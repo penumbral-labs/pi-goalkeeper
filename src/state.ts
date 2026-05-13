@@ -16,7 +16,9 @@ import {
 } from "./types.js";
 
 export const DEFAULT_GOAL_POLICY: GoalPolicy = {
-  maxContinuationTurns: 20,
+  maxContinuationTurns: null,
+  maxRepeatedToolCalls: 3,
+  maxRepeatedToolErrors: 3,
 };
 
 export const DEFAULT_GOAL_PROGRESS: GoalProgress = {
@@ -41,23 +43,37 @@ export function cloneGoal(goal: ThreadGoal): ThreadGoal {
     clone.policy = { ...goal.policy };
   }
   if (goal.progress) {
-    clone.progress = { ...goal.progress };
+    clone.progress = cloneProgress(goal.progress);
   }
   return clone;
 }
 
 export function goalPolicy(goal: ThreadGoal): GoalPolicy {
   return {
-    ...DEFAULT_GOAL_POLICY,
-    ...goal.policy,
+    maxContinuationTurns: goal.policy?.maxContinuationTurns ?? DEFAULT_GOAL_POLICY.maxContinuationTurns,
+    maxRepeatedToolCalls: goal.policy?.maxRepeatedToolCalls ?? DEFAULT_GOAL_POLICY.maxRepeatedToolCalls,
+    maxRepeatedToolErrors: goal.policy?.maxRepeatedToolErrors ?? DEFAULT_GOAL_POLICY.maxRepeatedToolErrors,
   };
 }
 
 export function goalProgress(goal: ThreadGoal): GoalProgress {
-  return {
+  return cloneProgress({
     ...DEFAULT_GOAL_PROGRESS,
     ...goal.progress,
+  });
+}
+
+function cloneProgress(progress: GoalProgress): GoalProgress {
+  const clone: GoalProgress = {
+    continuationTurns: progress.continuationTurns,
   };
+  if (progress.repeatedToolCall) {
+    clone.repeatedToolCall = { ...progress.repeatedToolCall };
+  }
+  if (progress.repeatedToolError) {
+    clone.repeatedToolError = { ...progress.repeatedToolError };
+  }
+  return clone;
 }
 
 export function validateObjective(objective: string): string | null {
@@ -86,6 +102,22 @@ export function statusAfterBudgetLimit(status: GoalStatus, tokensUsed: number, t
     return "budgetLimited";
   }
   return status;
+}
+
+function isTerminalLimitedStatus(status: GoalStatus): boolean {
+  return (
+    status === "budgetLimited" || status === "safetyLimited" || status === "loopLimited" || status === "errorLimited"
+  );
+}
+
+function statusForLimitReason(reason: GoalLimitReason): GoalStatus {
+  if (reason === "repeatedToolCall") {
+    return "loopLimited";
+  }
+  if (reason === "repeatedToolError") {
+    return "errorLimited";
+  }
+  return "safetyLimited";
 }
 
 export function createThreadGoal(objective: string, tokenBudget?: number | null, now = unixSeconds()): ThreadGoal {
@@ -169,8 +201,9 @@ function isOptionalGoalPolicy(policy: unknown): policy is GoalPolicy | undefined
   }
   const candidate = policy as GoalPolicy;
   return (
-    candidate.maxContinuationTurns === null ||
-    (Number.isInteger(candidate.maxContinuationTurns) && candidate.maxContinuationTurns >= 0)
+    isOptionalLimit(candidate.maxContinuationTurns) &&
+    isOptionalLimit(candidate.maxRepeatedToolCalls) &&
+    isOptionalLimit(candidate.maxRepeatedToolErrors)
   );
 }
 
@@ -182,11 +215,53 @@ function isOptionalGoalProgress(progress: unknown): progress is GoalProgress | u
     return false;
   }
   const candidate = progress as GoalProgress;
-  return Number.isInteger(candidate.continuationTurns) && candidate.continuationTurns >= 0;
+  return (
+    Number.isInteger(candidate.continuationTurns) &&
+    candidate.continuationTurns >= 0 &&
+    isOptionalRepeatedToolCallProgress(candidate.repeatedToolCall) &&
+    isOptionalRepeatedToolErrorProgress(candidate.repeatedToolError)
+  );
+}
+
+function isOptionalLimit(value: unknown): value is number | null | undefined {
+  return value === undefined || value === null || (typeof value === "number" && Number.isInteger(value) && value >= 0);
+}
+
+function isOptionalRepeatedToolCallProgress(progress: unknown): progress is GoalProgress["repeatedToolCall"] {
+  if (progress === undefined) {
+    return true;
+  }
+  if (!progress || typeof progress !== "object") {
+    return false;
+  }
+  const candidate = progress as { signature?: unknown; toolName?: unknown; count?: unknown };
+  return (
+    typeof candidate.signature === "string" &&
+    typeof candidate.toolName === "string" &&
+    typeof candidate.count === "number" &&
+    Number.isInteger(candidate.count) &&
+    candidate.count >= 0
+  );
+}
+
+function isOptionalRepeatedToolErrorProgress(progress: unknown): progress is GoalProgress["repeatedToolError"] {
+  if (progress === undefined) {
+    return true;
+  }
+  if (!progress || typeof progress !== "object") {
+    return false;
+  }
+  const candidate = progress as { normalizedError?: unknown };
+  return isOptionalRepeatedToolCallProgress(progress) && typeof candidate.normalizedError === "string";
 }
 
 function isOptionalGoalLimitReason(reason: unknown): reason is GoalLimitReason | undefined {
-  return reason === undefined || reason === "maxContinuationTurns";
+  return (
+    reason === undefined ||
+    reason === "maxContinuationTurns" ||
+    reason === "repeatedToolCall" ||
+    reason === "repeatedToolError"
+  );
 }
 
 export function isGoalStatus(status: unknown): status is GoalStatus {
@@ -194,7 +269,9 @@ export function isGoalStatus(status: unknown): status is GoalStatus {
     status === "active" ||
     status === "paused" ||
     status === "budgetLimited" ||
+    status === "safetyLimited" ||
     status === "loopLimited" ||
+    status === "errorLimited" ||
     status === "complete"
   );
 }
@@ -281,8 +358,8 @@ export function updateGoalStatus(current: ThreadGoal | null, status: GoalStatus)
   const goal = cloneGoal(current);
   if (current.status === "budgetLimited" && (status === "active" || status === "paused")) {
     goal.status = "budgetLimited";
-  } else if (current.status === "loopLimited" && (status === "active" || status === "paused")) {
-    goal.status = "loopLimited";
+  } else if (isTerminalLimitedStatus(current.status) && (status === "active" || status === "paused")) {
+    goal.status = current.status;
   } else {
     goal.status = statusAfterBudgetLimit(status, goal.usage.tokensUsed, goal.tokenBudget);
   }
@@ -327,6 +404,98 @@ export function recordContinuationQueued(current: ThreadGoal | null): GoalResult
   };
 }
 
+export function recordToolCallObserved(current: ThreadGoal | null, toolName: string, signature: string): GoalResult {
+  if (!current) {
+    return {
+      ok: false,
+      message: "No active goal exists.",
+      goal: null,
+    };
+  }
+
+  const goal = cloneGoal(current);
+  const progress = goalProgress(goal);
+  const previous = progress.repeatedToolCall;
+  progress.repeatedToolCall = {
+    signature,
+    toolName,
+    count: previous?.signature === signature ? previous.count + 1 : 1,
+  };
+  goal.policy = goalPolicy(goal);
+  goal.progress = progress;
+  goal.updatedAt = unixSeconds();
+
+  return {
+    ok: true,
+    message: "Goal tool call recorded.",
+    goal,
+  };
+}
+
+export function recordToolErrorObserved(
+  current: ThreadGoal | null,
+  toolName: string,
+  signature: string,
+  normalizedError: string,
+): GoalResult {
+  if (!current) {
+    return {
+      ok: false,
+      message: "No active goal exists.",
+      goal: null,
+    };
+  }
+
+  const goal = cloneGoal(current);
+  const progress = goalProgress(goal);
+  const previous = progress.repeatedToolError;
+  progress.repeatedToolError = {
+    signature,
+    toolName,
+    normalizedError,
+    count: previous?.signature === signature ? previous.count + 1 : 1,
+  };
+  goal.policy = goalPolicy(goal);
+  goal.progress = progress;
+  goal.updatedAt = unixSeconds();
+
+  return {
+    ok: true,
+    message: "Goal tool error recorded.",
+    goal,
+  };
+}
+
+export function clearToolErrorProgress(current: ThreadGoal | null): GoalResult {
+  if (!current) {
+    return {
+      ok: false,
+      message: "No active goal exists.",
+      goal: null,
+    };
+  }
+
+  const progress = goalProgress(current);
+  if (!progress.repeatedToolError) {
+    return {
+      ok: true,
+      message: "Goal tool error progress unchanged.",
+      goal: current,
+    };
+  }
+
+  const goal = cloneGoal(current);
+  const nextProgress = goalProgress(goal);
+  delete nextProgress.repeatedToolError;
+  goal.progress = nextProgress;
+  goal.updatedAt = unixSeconds();
+  return {
+    ok: true,
+    message: "Goal tool error progress cleared.",
+    goal,
+  };
+}
+
 export function limitGoal(current: ThreadGoal | null, reason: GoalLimitReason): GoalResult {
   if (!current) {
     return {
@@ -337,7 +506,7 @@ export function limitGoal(current: ThreadGoal | null, reason: GoalLimitReason): 
   }
 
   const goal = cloneGoal(current);
-  goal.status = "loopLimited";
+  goal.status = statusForLimitReason(reason);
   goal.limitReason = reason;
   goal.policy = goalPolicy(goal);
   goal.progress = goalProgress(goal);

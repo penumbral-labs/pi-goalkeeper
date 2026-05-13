@@ -1,16 +1,37 @@
 export const CUSTOM_ENTRY_TYPE = "pi-goalkeeper";
 export const MAX_OBJECTIVE_CHARS = 8000;
 
-export type GoalStatus = "active" | "paused" | "budgetLimited" | "loopLimited" | "complete";
+export type GoalStatus =
+  | "active"
+  | "paused"
+  | "budgetLimited"
+  | "safetyLimited"
+  | "loopLimited"
+  | "errorLimited"
+  | "complete";
 
-export type GoalLimitReason = "maxContinuationTurns";
+export type GoalLimitReason = "maxContinuationTurns" | "repeatedToolCall" | "repeatedToolError";
 
 export interface GoalPolicy {
   maxContinuationTurns: number | null;
+  maxRepeatedToolCalls: number | null;
+  maxRepeatedToolErrors: number | null;
+}
+
+export interface RepeatedToolCallProgress {
+  signature: string;
+  toolName: string;
+  count: number;
+}
+
+export interface RepeatedToolErrorProgress extends RepeatedToolCallProgress {
+  normalizedError: string;
 }
 
 export interface GoalProgress {
   continuationTurns: number;
+  repeatedToolCall?: RepeatedToolCallProgress;
+  repeatedToolError?: RepeatedToolErrorProgress;
 }
 
 export interface GoalUsage {

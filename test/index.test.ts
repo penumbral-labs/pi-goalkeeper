@@ -4,7 +4,7 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import goalExtension from "../src/index.js";
-import { isGoalCustomEntry, reconstructGoal, setEntry } from "../src/state.js";
+import { DEFAULT_GOAL_POLICY, isGoalCustomEntry, reconstructGoal, setEntry } from "../src/state.js";
 import { CUSTOM_ENTRY_TYPE, type ThreadGoal } from "../src/types.js";
 
 type EventHandler = (event: object, ctx: ExtensionContext) => unknown | Promise<unknown>;
@@ -360,14 +360,14 @@ test("tool-use turn ends do not queue continuation before tool execution finishe
   assert.equal(harness.sentMessages.length, 0);
 });
 
-test("max continuation turns trips a loop breaker before sending hidden follow-up", async () => {
+test("max continuation turns trips a safety fuse before sending hidden follow-up", async () => {
   const harness = createRuntimeHarness();
   await harness.runCommand("ship it");
   const current = harness.snapshot().goal;
   assert.ok(current);
   harness.appendGoal({
     ...current,
-    policy: { maxContinuationTurns: 1 },
+    policy: { ...DEFAULT_GOAL_POLICY, maxContinuationTurns: 1 },
     progress: { continuationTurns: 1 },
   });
   harness.sentMessages.length = 0;
@@ -375,9 +375,69 @@ test("max continuation turns trips a loop breaker before sending hidden follow-u
   await harness.emit("session_tree", { type: "session_tree", newLeafId: "leaf", oldLeafId: null });
 
   const goal = harness.snapshot().goal;
-  assert.equal(goal?.status, "loopLimited");
+  assert.equal(goal?.status, "safetyLimited");
   assert.equal(goal?.limitReason, "maxContinuationTurns");
   assert.equal(goal?.progress?.continuationTurns, 1);
+  assert.equal(harness.sentMessages.length, 0);
+});
+
+test("repeated identical tool calls trip a loop breaker before execution", async () => {
+  const harness = createRuntimeHarness();
+  await harness.runCommand("ship it");
+  harness.sentMessages.length = 0;
+
+  const first = await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-1",
+    input: { path: "README.md" },
+  });
+  const second = await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-2",
+    input: { path: "README.md" },
+  });
+  const third = await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-3",
+    input: { path: "README.md" },
+  });
+
+  assert.equal(first[0], undefined);
+  assert.equal(second[0], undefined);
+  assert.deepEqual(third[0], {
+    block: true,
+    reason: "Blocked repeated read call after 3 identical attempts.",
+  });
+  const goal = harness.snapshot().goal;
+  assert.equal(goal?.status, "loopLimited");
+  assert.equal(goal?.limitReason, "repeatedToolCall");
+  assert.equal(goal?.progress?.repeatedToolCall?.count, 3);
+  assert.equal(harness.sentMessages.length, 0);
+});
+
+test("repeated identical tool errors trip an error breaker", async () => {
+  const harness = createRuntimeHarness();
+  await harness.runCommand("ship it");
+  harness.sentMessages.length = 0;
+
+  for (let index = 0; index < 3; index += 1) {
+    await harness.emit("tool_execution_end", {
+      type: "tool_execution_end",
+      toolCallId: `tool-${index}`,
+      toolName: "bash",
+      args: { command: "missing-command" },
+      result: { stderr: "missing-command: command not found", code: 127 },
+      isError: true,
+    });
+  }
+
+  const goal = harness.snapshot().goal;
+  assert.equal(goal?.status, "errorLimited");
+  assert.equal(goal?.limitReason, "repeatedToolError");
+  assert.equal(goal?.progress?.repeatedToolError?.count, 3);
   assert.equal(harness.sentMessages.length, 0);
 });
 
@@ -445,7 +505,7 @@ test("goal tools return Codex-shaped response details", async () => {
 
   assert.equal((created.details.goal as { objective?: string }).objective, "ship it");
   assert.equal((created.details.goal as { tokenBudget?: number }).tokenBudget, 20);
-  assert.deepEqual((created.details.goal as { policy?: unknown }).policy, { maxContinuationTurns: 20 });
+  assert.deepEqual((created.details.goal as { policy?: unknown }).policy, DEFAULT_GOAL_POLICY);
   assert.deepEqual((created.details.goal as { progress?: unknown }).progress, { continuationTurns: 0 });
   assert.equal((created.details.goal as { limitReason?: unknown }).limitReason, null);
   assert.equal(created.details.remainingTokens, 20);

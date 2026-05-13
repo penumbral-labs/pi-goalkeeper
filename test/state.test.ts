@@ -66,7 +66,7 @@ test("reconstructGoal rejects malformed policy and progress entries", () => {
   assert.ok(created);
 
   const malformedPolicy = {
-    ...setEntry({ ...created, policy: { maxContinuationTurns: -1 } }, "runtime", 1),
+    ...setEntry({ ...created, policy: { ...DEFAULT_GOAL_POLICY, maxContinuationTurns: -1 } }, "runtime", 1),
   };
   const malformedProgress = {
     ...setEntry({ ...created, progress: { continuationTurns: 1.5 } }, "runtime", 2),

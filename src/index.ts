@@ -6,10 +6,15 @@ import { budgetLimitPrompt, continuationGoalIdFromPrompt, continuationPrompt } f
 import {
   applyUsage,
   clearEntry,
+  clearToolErrorProgress,
+  goalPolicy,
+  goalProgress,
   goalWithLiveUsage,
   hasReachedContinuationLimit,
   limitGoal,
   recordContinuationQueued,
+  recordToolCallObserved,
+  recordToolErrorObserved,
   reconstructGoal,
   setEntry,
   updateGoalStatus,
@@ -101,6 +106,29 @@ function queuedGoalWorkMessageId(message: {
   }
 
   return null;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(",")}}`;
+}
+
+function toolSignature(toolName: string, input: unknown): string {
+  return `${toolName}:${stableJson(input)}`;
+}
+
+function normalizeToolError(result: unknown): string {
+  const normalized = typeof result === "string" ? result : stableJson(result);
+  return normalized.replace(/\s+/g, " ").trim().slice(0, 500);
 }
 
 const CONTINUATION_RETRY_MS = 50;
@@ -332,6 +360,74 @@ export default function (pi: ExtensionAPI): void {
     );
   };
 
+  const recordToolCallOrLimit = (
+    toolName: string,
+    input: unknown,
+    ctx: ExtensionContext,
+  ): { block: boolean; reason?: string } => {
+    if (!goal || goal.status !== "active") {
+      return { block: false };
+    }
+
+    const recorded = recordToolCallObserved(goal, toolName, toolSignature(toolName, input));
+    if (!recorded.ok || !recorded.goal) {
+      return { block: false };
+    }
+    persistGoal(recorded.goal, "runtime");
+    refreshUi(ctx);
+
+    const policy = goalPolicy(recorded.goal);
+    const repeated = goalProgress(recorded.goal).repeatedToolCall;
+    if (policy.maxRepeatedToolCalls !== null && repeated && repeated.count >= policy.maxRepeatedToolCalls) {
+      const limited = limitGoal(recorded.goal, "repeatedToolCall");
+      if (limited.ok && limited.goal) {
+        persistGoal(limited.goal, "runtime");
+        refreshUi(ctx);
+      }
+      return {
+        block: true,
+        reason: `Blocked repeated ${toolName} call after ${repeated.count} identical attempts.`,
+      };
+    }
+
+    return { block: false };
+  };
+
+  const recordToolErrorOrLimit = (toolName: string, args: unknown, result: unknown, ctx: ExtensionContext): void => {
+    if (!goal || goal.status !== "active") {
+      return;
+    }
+
+    const normalizedError = normalizeToolError(result);
+    const recorded = recordToolErrorObserved(goal, toolName, toolSignature(toolName, args), normalizedError);
+    if (!recorded.ok || !recorded.goal) {
+      return;
+    }
+    persistGoal(recorded.goal, "runtime");
+    refreshUi(ctx);
+
+    const policy = goalPolicy(recorded.goal);
+    const repeated = goalProgress(recorded.goal).repeatedToolError;
+    if (policy.maxRepeatedToolErrors !== null && repeated && repeated.count >= policy.maxRepeatedToolErrors) {
+      const limited = limitGoal(recorded.goal, "repeatedToolError");
+      if (limited.ok && limited.goal) {
+        persistGoal(limited.goal, "runtime");
+        refreshUi(ctx);
+      }
+    }
+  };
+
+  const clearToolErrorIfNeeded = (ctx: ExtensionContext): void => {
+    if (!goal || goal.status !== "active" || !goalProgress(goal).repeatedToolError) {
+      return;
+    }
+    const result = clearToolErrorProgress(goal);
+    if (result.ok && result.goal && result.goal !== goal) {
+      persistGoal(result.goal, "runtime");
+      refreshUi(ctx);
+    }
+  };
+
   const maybeContinue = (ctx: ExtensionContext): void => {
     if (!goal || goal.status !== "active" || continuationQueuedFor === goal.goalId) {
       return;
@@ -450,7 +546,28 @@ export default function (pi: ExtensionAPI): void {
     refreshUi(ctx);
   });
 
+  const onToolCall = pi.on as unknown as (
+    event: "tool_call",
+    handler: (
+      event: { toolName: string; input: unknown },
+      ctx: ExtensionContext,
+    ) => Promise<{ block: true; reason?: string } | undefined>,
+  ) => void;
+
+  onToolCall("tool_call", async (_event, ctx) => {
+    const decision = recordToolCallOrLimit(_event.toolName, _event.input, ctx);
+    if (decision.block) {
+      return decision.reason ? { block: true, reason: decision.reason } : { block: true };
+    }
+  });
+
   pi.on("tool_execution_end", async (_event, ctx) => {
+    if (_event.isError) {
+      const eventWithArgs = _event as typeof _event & { args?: unknown };
+      recordToolErrorOrLimit(_event.toolName, eventWithArgs.args ?? {}, _event.result, ctx);
+    } else {
+      clearToolErrorIfNeeded(ctx);
+    }
     accountProgress(ctx, true, 0, true);
   });
 
