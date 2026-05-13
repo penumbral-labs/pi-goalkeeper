@@ -61,6 +61,27 @@ test("applyUsage marks active goals budgetLimited after crossing budget", () => 
   assert.equal(result.goal?.usage.activeSeconds, 7);
 });
 
+test("reconstructGoal rejects malformed policy and progress entries", () => {
+  const created = createGoal(null, "finish").goal;
+  assert.ok(created);
+
+  const malformedPolicy = {
+    ...setEntry({ ...created, policy: { maxContinuationTurns: -1 } }, "runtime", 1),
+  };
+  const malformedProgress = {
+    ...setEntry({ ...created, progress: { continuationTurns: 1.5 } }, "runtime", 2),
+  };
+
+  assert.deepEqual(reconstructGoal([{ type: "custom", customType: CUSTOM_ENTRY_TYPE, data: malformedPolicy }]), {
+    goal: null,
+    hasGoal: false,
+  });
+  assert.deepEqual(reconstructGoal([{ type: "custom", customType: CUSTOM_ENTRY_TYPE, data: malformedProgress }]), {
+    goal: null,
+    hasGoal: false,
+  });
+});
+
 test("updateGoalStatus marks completion without clearing final usage", () => {
   const created = createGoal(null, "finish", 10).goal;
   assert.ok(created);

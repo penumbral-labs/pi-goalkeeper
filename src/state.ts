@@ -168,7 +168,10 @@ function isOptionalGoalPolicy(policy: unknown): policy is GoalPolicy | undefined
     return false;
   }
   const candidate = policy as GoalPolicy;
-  return candidate.maxContinuationTurns === null || typeof candidate.maxContinuationTurns === "number";
+  return (
+    candidate.maxContinuationTurns === null ||
+    (Number.isInteger(candidate.maxContinuationTurns) && candidate.maxContinuationTurns >= 0)
+  );
 }
 
 function isOptionalGoalProgress(progress: unknown): progress is GoalProgress | undefined {
@@ -179,7 +182,7 @@ function isOptionalGoalProgress(progress: unknown): progress is GoalProgress | u
     return false;
   }
   const candidate = progress as GoalProgress;
-  return typeof candidate.continuationTurns === "number";
+  return Number.isInteger(candidate.continuationTurns) && candidate.continuationTurns >= 0;
 }
 
 function isOptionalGoalLimitReason(reason: unknown): reason is GoalLimitReason | undefined {

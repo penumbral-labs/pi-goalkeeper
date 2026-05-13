@@ -2,7 +2,13 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 
 import { formatGoalSummary } from "./format.js";
 import { continuationPrompt } from "./prompts.js";
-import { replaceGoal, updateGoalStatus } from "./state.js";
+import {
+  hasReachedContinuationLimit,
+  limitGoal,
+  recordContinuationQueued,
+  replaceGoal,
+  updateGoalStatus,
+} from "./state.js";
 import { CUSTOM_ENTRY_TYPE, type GoalEntrySource, type ThreadGoal } from "./types.js";
 
 export interface CommandHost {
@@ -28,13 +34,34 @@ function completions(prefix: string) {
   }));
 }
 
-function queueGoalTurn(pi: GoalCommandPi, goal: ThreadGoal, kind: "command_start" | "command_resume"): void {
+function queueGoalTurn(
+  pi: GoalCommandPi,
+  host: CommandHost,
+  goal: ThreadGoal,
+  kind: "command_start" | "command_resume",
+  ctx: GoalCommandContext,
+): void {
+  if (hasReachedContinuationLimit(goal)) {
+    const result = limitGoal(goal, "maxContinuationTurns");
+    if (result.ok && result.goal) {
+      host.setGoal(result.goal, "runtime", ctx);
+      ctx.ui.notify(result.message, "warning");
+    }
+    return;
+  }
+
+  const result = recordContinuationQueued(goal);
+  if (!result.ok || !result.goal) {
+    return;
+  }
+
+  host.setGoal(result.goal, "runtime", ctx);
   pi.sendMessage(
     {
       customType: CUSTOM_ENTRY_TYPE,
-      content: continuationPrompt(goal),
+      content: continuationPrompt(result.goal),
       display: false,
-      details: { kind, goalId: goal.goalId },
+      details: { kind, goalId: result.goal.goalId },
     },
     { triggerTurn: true, deliverAs: "followUp" },
   );
@@ -74,7 +101,7 @@ export async function handleGoalCommand(
     host.setGoal(result.goal, "command", ctx);
     ctx.ui.notify(result.message);
     if (trimmed === "resume" && result.goal.status === "active") {
-      queueGoalTurn(pi, result.goal, "command_resume");
+      queueGoalTurn(pi, host, result.goal, "command_resume", ctx);
     }
     return;
   }
@@ -102,7 +129,7 @@ export async function handleGoalCommand(
   }
   host.setGoal(result.goal, "command", ctx);
   ctx.ui.notify(result.message);
-  queueGoalTurn(pi, result.goal, "command_start");
+  queueGoalTurn(pi, host, result.goal, "command_start", ctx);
 }
 
 export function registerGoalCommand(pi: GoalCommandPi, host: CommandHost): void {

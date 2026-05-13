@@ -1,4 +1,4 @@
-import type { GoalStatus, ThreadGoal } from "./types.js";
+import type { GoalLimitReason, GoalPolicy, GoalProgress, GoalStatus, ThreadGoal } from "./types.js";
 
 const COMPACT_TOKEN_UNITS = [
   { suffix: "T", value: 1_000_000_000_000 },
@@ -14,6 +14,9 @@ export interface GoalToolRecord {
   tokenBudget: number | null;
   tokensUsed: number;
   timeUsedSeconds: number;
+  policy: GoalPolicy | null;
+  progress: GoalProgress | null;
+  limitReason: GoalLimitReason | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -180,6 +183,9 @@ export function toToolGoal(goal: ThreadGoal): GoalToolRecord {
     tokenBudget: goal.tokenBudget,
     tokensUsed: goal.usage.tokensUsed,
     timeUsedSeconds: goal.usage.activeSeconds,
+    policy: goal.policy ? { ...goal.policy } : null,
+    progress: goal.progress ? { ...goal.progress } : null,
+    limitReason: goal.limitReason ?? null,
     createdAt: goal.createdAt,
     updatedAt: goal.updatedAt,
   };

@@ -334,7 +334,7 @@ test("completed turns count input plus output and continue active goals", async 
   const goal = harness.snapshot().goal;
   assert.equal(goal?.status, "active");
   assert.equal(goal?.usage.tokensUsed, 42);
-  assert.equal(goal?.progress?.continuationTurns, 1);
+  assert.equal(goal?.progress?.continuationTurns, 2);
   assert.equal(harness.sentMessages.length, 1);
   assert.equal(harness.sentMessages[0]?.message.customType, CUSTOM_ENTRY_TYPE);
   assert.deepEqual(harness.sentMessages[0]?.message.details, {
@@ -445,6 +445,9 @@ test("goal tools return Codex-shaped response details", async () => {
 
   assert.equal((created.details.goal as { objective?: string }).objective, "ship it");
   assert.equal((created.details.goal as { tokenBudget?: number }).tokenBudget, 20);
+  assert.deepEqual((created.details.goal as { policy?: unknown }).policy, { maxContinuationTurns: 20 });
+  assert.deepEqual((created.details.goal as { progress?: unknown }).progress, { continuationTurns: 0 });
+  assert.equal((created.details.goal as { limitReason?: unknown }).limitReason, null);
   assert.equal(created.details.remainingTokens, 20);
   assert.equal(created.details.completionBudgetReport, null);
   assert.deepEqual(JSON.parse(created.content[0]?.text ?? ""), {
