@@ -1,6 +1,9 @@
-# pi-codex-goal
+# pi-goalkeeper
 
-Codex-style goal tracking for pi.
+Guarded goal tracking and continuation for pi.
+
+This project is forked from [`pi-codex-goal`](https://github.com/fitchmultz/pi-codex-goal) and preserves its MIT
+attribution while we add stronger runtime circuit breakers.
 
 This package adds a `/goal` command plus three model-callable tools:
 
@@ -8,32 +11,33 @@ This package adds a `/goal` command plus three model-callable tools:
 - `create_goal`
 - `update_goal`
 
-Goal state is stored in pi session custom entries, so it follows session history, resume, fork, tree navigation, reload, and compaction behavior without an external database.
+Goal state is stored in pi session custom entries, so it follows session history, resume, fork, tree navigation, reload,
+and compaction behavior without an external database.
 
 ## Install
 
 Install from npm:
 
 ```sh
-pi install npm:pi-codex-goal
+pi install npm:pi-goalkeeper
 ```
 
 Install a pinned npm version:
 
 ```sh
-pi install npm:pi-codex-goal@0.1.9
+pi install npm:pi-goalkeeper@0.1.9
 ```
 
 Install from GitHub:
 
 ```sh
-pi install https://github.com/fitchmultz/pi-codex-goal
+pi install https://github.com/penumbral-labs/pi-goalkeeper
 ```
 
 Install a pinned GitHub release:
 
 ```sh
-pi install https://github.com/fitchmultz/pi-codex-goal@v0.1.9
+pi install https://github.com/penumbral-labs/pi-goalkeeper@v0.1.9
 ```
 
 For local development from this repository:
@@ -53,9 +57,11 @@ pi install .
 /goal clear
 ```
 
-`/goal` with no arguments reports the current objective, status, token budget, token usage, and elapsed active time. A plain `/goal <objective>` starts a new goal or replaces the current one after confirmation.
+`/goal` with no arguments reports the current objective, status, token budget, token usage, and elapsed active time. A
+plain `/goal <objective>` starts a new goal or replaces the current one after confirmation.
 
-This intentionally matches Codex TUI behavior: token budgets are set through the model tool rather than parsed from `/goal --tokens`. This package keeps its objective size limit at 8000 Unicode characters.
+This intentionally matches Codex TUI behavior: token budgets are set through the model tool rather than parsed from
+`/goal --tokens`. This package keeps its objective size limit at 8000 Unicode characters.
 
 ## Model Tools
 
@@ -63,7 +69,8 @@ This intentionally matches Codex TUI behavior: token budgets are set through the
 
 `get_goal` returns the current goal state and usage.
 
-`update_goal` only accepts `status: "complete"`, matching Codex's model-side contract. The extension reports final token and elapsed-time usage before marking the goal complete.
+`update_goal` only accepts `status: "complete"`, matching Codex's model-side contract. The extension reports final token
+and elapsed-time usage before marking the goal complete.
 
 ## Behavior
 
@@ -77,4 +84,7 @@ While a goal is active, the extension:
 - sends hidden steering messages when budget is reached or when the agent is idle but the goal is still active
 - shows Codex-style status labels with compact token or elapsed-time usage in the pi footer when UI is available
 
-Token counts are formatted with commas and compact abbreviations, for example `123M (123,456,789) tokens`. Token totals use pi's completed assistant turn input plus output usage. Cache read and cache write channels are excluded because they are provider cache accounting fields, not extra sent and received text tokens. Pi does not currently expose a separate extension usage total for automatic compaction summary calls.
+Token counts are formatted with commas and compact abbreviations, for example `123M (123,456,789) tokens`. Token totals
+use pi's completed assistant turn input plus output usage. Cache read and cache write channels are excluded because they
+are provider cache accounting fields, not extra sent and received text tokens. Pi does not currently expose a separate
+extension usage total for automatic compaction summary calls.

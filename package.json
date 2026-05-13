@@ -1,9 +1,12 @@
 {
-  "name": "pi-codex-goal",
+  "name": "pi-goalkeeper",
   "version": "0.1.9",
-  "description": "Codex-style goal tracking and continuation for pi.",
+  "description": "Guarded goal tracking and continuation for pi.",
   "type": "module",
-  "author": "Mitch Fultz (https://github.com/fitchmultz)",
+  "author": "Penumbral Labs",
+  "contributors": [
+    "Mitch Fultz (https://github.com/fitchmultz)"
+  ],
   "license": "MIT",
   "main": "src/index.ts",
   "files": [
@@ -18,16 +21,18 @@
     "pi-extension",
     "extension",
     "codex",
-    "goal"
+    "goal",
+    "watchdog",
+    "guardrails"
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fitchmultz/pi-codex-goal.git"
+    "url": "git+https://github.com/penumbral-labs/pi-goalkeeper.git"
   },
   "bugs": {
-    "url": "https://github.com/fitchmultz/pi-codex-goal/issues"
+    "url": "https://github.com/penumbral-labs/pi-goalkeeper/issues"
   },
-  "homepage": "https://github.com/fitchmultz/pi-codex-goal#readme",
+  "homepage": "https://github.com/penumbral-labs/pi-goalkeeper#readme",
   "pi": {
     "extensions": [
       "./src/index.ts"

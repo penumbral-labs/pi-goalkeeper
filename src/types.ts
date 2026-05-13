@@ -1,4 +1,4 @@
-export const CUSTOM_ENTRY_TYPE = "pi-codex-goal";
+export const CUSTOM_ENTRY_TYPE = "pi-goalkeeper";
 export const MAX_OBJECTIVE_CHARS = 8000;
 
 export type GoalStatus = "active" | "paused" | "budgetLimited" | "complete";
