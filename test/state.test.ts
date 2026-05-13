@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatBudget, formatDuration, formatFooterStatus, formatGoalSummary, formatTokenValue } from "../src/format.js";
+import {
+  formatBudget,
+  formatDuration,
+  formatFooterStatus,
+  formatGoalSummary,
+  formatTokenValue,
+} from "../src/format.js";
 import { budgetLimitPrompt, continuationPrompt } from "../src/prompts.js";
 import {
+  DEFAULT_GOAL_POLICY,
   applyUsage,
   clearEntry,
   createGoal,
@@ -24,6 +31,8 @@ test("createGoal validates objective and positive token budgets", () => {
   assert.equal(result.goal?.objective, "ship it");
   assert.equal(result.goal?.status, "active");
   assert.equal(result.goal?.tokenBudget, 123);
+  assert.deepEqual(result.goal?.policy, DEFAULT_GOAL_POLICY);
+  assert.deepEqual(result.goal?.progress, { continuationTurns: 0 });
 });
 
 test("reconstructGoal follows branch-local set and clear entries", () => {

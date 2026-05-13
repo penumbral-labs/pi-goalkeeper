@@ -4,8 +4,8 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import goalExtension from "../src/index.js";
-import { isGoalCustomEntry, reconstructGoal } from "../src/state.js";
-import { CUSTOM_ENTRY_TYPE } from "../src/types.js";
+import { isGoalCustomEntry, reconstructGoal, setEntry } from "../src/state.js";
+import { CUSTOM_ENTRY_TYPE, type ThreadGoal } from "../src/types.js";
 
 type EventHandler = (event: object, ctx: ExtensionContext) => unknown | Promise<unknown>;
 
@@ -195,6 +195,9 @@ function createRuntimeHarness(options: { idle?: boolean; pendingMessages?: boole
     get abortCount() {
       return runtime.abortCount;
     },
+    appendGoal(goal: ThreadGoal) {
+      pi.appendEntry(CUSTOM_ENTRY_TYPE, setEntry(goal, "runtime"));
+    },
     snapshot: () => reconstructGoal(entries),
   };
 }
@@ -331,6 +334,7 @@ test("completed turns count input plus output and continue active goals", async 
   const goal = harness.snapshot().goal;
   assert.equal(goal?.status, "active");
   assert.equal(goal?.usage.tokensUsed, 42);
+  assert.equal(goal?.progress?.continuationTurns, 1);
   assert.equal(harness.sentMessages.length, 1);
   assert.equal(harness.sentMessages[0]?.message.customType, CUSTOM_ENTRY_TYPE);
   assert.deepEqual(harness.sentMessages[0]?.message.details, {
@@ -353,6 +357,27 @@ test("tool-use turn ends do not queue continuation before tool execution finishe
   });
 
   assert.equal(harness.snapshot().goal?.status, "active");
+  assert.equal(harness.sentMessages.length, 0);
+});
+
+test("max continuation turns trips a loop breaker before sending hidden follow-up", async () => {
+  const harness = createRuntimeHarness();
+  await harness.runCommand("ship it");
+  const current = harness.snapshot().goal;
+  assert.ok(current);
+  harness.appendGoal({
+    ...current,
+    policy: { maxContinuationTurns: 1 },
+    progress: { continuationTurns: 1 },
+  });
+  harness.sentMessages.length = 0;
+
+  await harness.emit("session_tree", { type: "session_tree", newLeafId: "leaf", oldLeafId: null });
+
+  const goal = harness.snapshot().goal;
+  assert.equal(goal?.status, "loopLimited");
+  assert.equal(goal?.limitReason, "maxContinuationTurns");
+  assert.equal(goal?.progress?.continuationTurns, 1);
   assert.equal(harness.sentMessages.length, 0);
 });
 
@@ -431,7 +456,10 @@ test("goal tools return Codex-shaped response details", async () => {
   const completed = (await harness.runTool("update_goal", { status: "complete" })) as {
     details: Record<string, unknown>;
   };
-  assert.match(String(completed.details.completionBudgetReport), /^Goal achieved\. Report final budget usage to the user:/);
+  assert.match(
+    String(completed.details.completionBudgetReport),
+    /^Goal achieved\. Report final budget usage to the user:/,
+  );
 });
 
 test("agent end waits for idle before continuing active goals", async () => {

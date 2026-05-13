@@ -3,7 +3,17 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { registerGoalCommand } from "./commands.js";
 import { formatFooterStatus } from "./format.js";
 import { budgetLimitPrompt, continuationGoalIdFromPrompt, continuationPrompt } from "./prompts.js";
-import { applyUsage, clearEntry, goalWithLiveUsage, reconstructGoal, setEntry, updateGoalStatus } from "./state.js";
+import {
+  applyUsage,
+  clearEntry,
+  goalWithLiveUsage,
+  hasReachedContinuationLimit,
+  limitGoal,
+  recordContinuationQueued,
+  reconstructGoal,
+  setEntry,
+  updateGoalStatus,
+} from "./state.js";
 import { registerGoalTools } from "./tools.js";
 import { CUSTOM_ENTRY_TYPE, type GoalEntrySource, type GoalResult, type ThreadGoal } from "./types.js";
 
@@ -293,14 +303,30 @@ export default function (pi: ExtensionAPI): void {
     return result;
   };
 
-  const sendContinuation = (goalToContinue: ThreadGoal): void => {
-    continuationQueuedFor = goalToContinue.goalId;
+  const sendContinuation = (goalToContinue: ThreadGoal, ctx: ExtensionContext): void => {
+    if (hasReachedContinuationLimit(goalToContinue)) {
+      const result = limitGoal(goalToContinue, "maxContinuationTurns");
+      if (result.ok && result.goal) {
+        persistGoal(result.goal, "runtime");
+        refreshUi(ctx);
+      }
+      return;
+    }
+
+    const result = recordContinuationQueued(goalToContinue);
+    if (!result.ok || !result.goal) {
+      return;
+    }
+
+    persistGoal(result.goal, "runtime");
+    refreshUi(ctx);
+    continuationQueuedFor = result.goal.goalId;
     pi.sendMessage(
       {
         customType: CUSTOM_ENTRY_TYPE,
-        content: continuationPrompt(goalToContinue),
+        content: continuationPrompt(result.goal),
         display: false,
-        details: { kind: "continuation", goalId: goalToContinue.goalId },
+        details: { kind: "continuation", goalId: result.goal.goalId },
       },
       { triggerTurn: true, deliverAs: "followUp" },
     );
@@ -330,7 +356,7 @@ export default function (pi: ExtensionAPI): void {
     if (!goal || goal.status !== "active" || goal.goalId !== goalId) {
       return;
     }
-    sendContinuation(goal);
+    sendContinuation(goal, ctx);
   };
 
   registerGoalTools(pi, {
@@ -410,11 +436,7 @@ export default function (pi: ExtensionAPI): void {
         ctx.abort();
         refreshUi(ctx);
         return {
-          systemPrompt: [
-            _event.systemPrompt,
-            "",
-            staleGoalContinuationMessage(continuationGoalId, goal),
-          ].join("\n"),
+          systemPrompt: [_event.systemPrompt, "", staleGoalContinuationMessage(continuationGoalId, goal)].join("\n"),
         };
       }
     } else {

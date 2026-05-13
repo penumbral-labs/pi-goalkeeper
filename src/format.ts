@@ -84,7 +84,13 @@ export function formatBudget(goal: ThreadGoal): string {
 }
 
 function statusLabel(status: GoalStatus): string {
-  return status === "budgetLimited" ? "limited by budget" : status;
+  if (status === "budgetLimited") {
+    return "limited by budget";
+  }
+  if (status === "loopLimited") {
+    return "limited by loop breaker";
+  }
+  return status;
 }
 
 function commandHint(status: GoalStatus): string {
@@ -93,6 +99,9 @@ function commandHint(status: GoalStatus): string {
   }
   if (status === "paused") {
     return "/goal resume, /goal clear";
+  }
+  if (status === "loopLimited") {
+    return "/goal clear";
   }
   return "/goal clear";
 }
@@ -148,6 +157,10 @@ export function formatFooterStatus(goal: ThreadGoal | null): string | undefined 
       return `Goal unmet (${compactBudgetUsage(goal)} tokens)`;
     }
     return "Goal abandoned";
+  }
+
+  if (goal.status === "loopLimited") {
+    return "Goal stopped (loop breaker)";
   }
 
   if (goal.tokenBudget !== null) {

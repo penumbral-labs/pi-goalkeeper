@@ -5,12 +5,23 @@ import {
   MAX_OBJECTIVE_CHARS,
   type GoalCustomEntry,
   type GoalEntrySource,
+  type GoalLimitReason,
+  type GoalPolicy,
+  type GoalProgress,
   type GoalResult,
   type GoalSnapshot,
   type GoalStatus,
   type SessionEntryLike,
   type ThreadGoal,
 } from "./types.js";
+
+export const DEFAULT_GOAL_POLICY: GoalPolicy = {
+  maxContinuationTurns: 20,
+};
+
+export const DEFAULT_GOAL_PROGRESS: GoalProgress = {
+  continuationTurns: 0,
+};
 
 export interface ApplyUsageOptions {
   expectedGoalId?: string | null;
@@ -22,9 +33,30 @@ export function unixSeconds(): number {
 }
 
 export function cloneGoal(goal: ThreadGoal): ThreadGoal {
-  return {
+  const clone: ThreadGoal = {
     ...goal,
     usage: { ...goal.usage },
+  };
+  if (goal.policy) {
+    clone.policy = { ...goal.policy };
+  }
+  if (goal.progress) {
+    clone.progress = { ...goal.progress };
+  }
+  return clone;
+}
+
+export function goalPolicy(goal: ThreadGoal): GoalPolicy {
+  return {
+    ...DEFAULT_GOAL_POLICY,
+    ...goal.policy,
+  };
+}
+
+export function goalProgress(goal: ThreadGoal): GoalProgress {
+  return {
+    ...DEFAULT_GOAL_PROGRESS,
+    ...goal.progress,
   };
 }
 
@@ -66,6 +98,8 @@ export function createThreadGoal(objective: string, tokenBudget?: number | null,
       tokensUsed: 0,
       activeSeconds: 0,
     },
+    policy: { ...DEFAULT_GOAL_POLICY },
+    progress: { ...DEFAULT_GOAL_PROGRESS },
     createdAt: now,
     updatedAt: now,
   };
@@ -81,11 +115,7 @@ export function setEntry(goal: ThreadGoal, source: GoalEntrySource, at = unixSec
   };
 }
 
-export function clearEntry(
-  clearedGoalId: string | null,
-  source: GoalEntrySource,
-  at = unixSeconds(),
-): GoalCustomEntry {
+export function clearEntry(clearedGoalId: string | null, source: GoalEntrySource, at = unixSeconds()): GoalCustomEntry {
   return {
     version: 1,
     kind: "clear",
@@ -123,12 +153,47 @@ export function isThreadGoal(goal: unknown): goal is ThreadGoal {
     typeof candidate.updatedAt === "number" &&
     candidate.usage !== undefined &&
     typeof candidate.usage.tokensUsed === "number" &&
-    typeof candidate.usage.activeSeconds === "number"
+    typeof candidate.usage.activeSeconds === "number" &&
+    isOptionalGoalPolicy(candidate.policy) &&
+    isOptionalGoalProgress(candidate.progress) &&
+    isOptionalGoalLimitReason(candidate.limitReason)
   );
 }
 
+function isOptionalGoalPolicy(policy: unknown): policy is GoalPolicy | undefined {
+  if (policy === undefined) {
+    return true;
+  }
+  if (!policy || typeof policy !== "object") {
+    return false;
+  }
+  const candidate = policy as GoalPolicy;
+  return candidate.maxContinuationTurns === null || typeof candidate.maxContinuationTurns === "number";
+}
+
+function isOptionalGoalProgress(progress: unknown): progress is GoalProgress | undefined {
+  if (progress === undefined) {
+    return true;
+  }
+  if (!progress || typeof progress !== "object") {
+    return false;
+  }
+  const candidate = progress as GoalProgress;
+  return typeof candidate.continuationTurns === "number";
+}
+
+function isOptionalGoalLimitReason(reason: unknown): reason is GoalLimitReason | undefined {
+  return reason === undefined || reason === "maxContinuationTurns";
+}
+
 export function isGoalStatus(status: unknown): status is GoalStatus {
-  return status === "active" || status === "paused" || status === "budgetLimited" || status === "complete";
+  return (
+    status === "active" ||
+    status === "paused" ||
+    status === "budgetLimited" ||
+    status === "loopLimited" ||
+    status === "complete"
+  );
 }
 
 export function reconstructGoal(entries: Iterable<SessionEntryLike>): GoalSnapshot {
@@ -213,6 +278,8 @@ export function updateGoalStatus(current: ThreadGoal | null, status: GoalStatus)
   const goal = cloneGoal(current);
   if (current.status === "budgetLimited" && (status === "active" || status === "paused")) {
     goal.status = "budgetLimited";
+  } else if (current.status === "loopLimited" && (status === "active" || status === "paused")) {
+    goal.status = "loopLimited";
   } else {
     goal.status = statusAfterBudgetLimit(status, goal.usage.tokensUsed, goal.tokenBudget);
   }
@@ -221,6 +288,61 @@ export function updateGoalStatus(current: ThreadGoal | null, status: GoalStatus)
   return {
     ok: true,
     message: `Goal marked ${goal.status}.`,
+    goal,
+  };
+}
+
+export function hasReachedContinuationLimit(goal: ThreadGoal): boolean {
+  const policy = goalPolicy(goal);
+  if (policy.maxContinuationTurns === null) {
+    return false;
+  }
+  return goalProgress(goal).continuationTurns >= policy.maxContinuationTurns;
+}
+
+export function recordContinuationQueued(current: ThreadGoal | null): GoalResult {
+  if (!current) {
+    return {
+      ok: false,
+      message: "No active goal exists.",
+      goal: null,
+    };
+  }
+
+  const goal = cloneGoal(current);
+  goal.policy = goalPolicy(goal);
+  goal.progress = {
+    ...goalProgress(goal),
+    continuationTurns: goalProgress(goal).continuationTurns + 1,
+  };
+  goal.updatedAt = unixSeconds();
+
+  return {
+    ok: true,
+    message: "Goal continuation recorded.",
+    goal,
+  };
+}
+
+export function limitGoal(current: ThreadGoal | null, reason: GoalLimitReason): GoalResult {
+  if (!current) {
+    return {
+      ok: false,
+      message: "No active goal exists.",
+      goal: null,
+    };
+  }
+
+  const goal = cloneGoal(current);
+  goal.status = "loopLimited";
+  goal.limitReason = reason;
+  goal.policy = goalPolicy(goal);
+  goal.progress = goalProgress(goal);
+  goal.updatedAt = unixSeconds();
+
+  return {
+    ok: true,
+    message: `Goal limited by ${reason}.`,
     goal,
   };
 }
