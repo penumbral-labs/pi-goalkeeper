@@ -111,6 +111,9 @@ function isTerminalLimitedStatus(status: GoalStatus): boolean {
 }
 
 function statusForLimitReason(reason: GoalLimitReason): GoalStatus {
+  if (reason === "maxContinuationTurns") {
+    return "loopLimited";
+  }
   if (reason === "repeatedToolCall") {
     return "loopLimited";
   }
@@ -180,12 +183,20 @@ export function isThreadGoal(goal: unknown): goal is ThreadGoal {
     typeof candidate.goalId === "string" &&
     typeof candidate.objective === "string" &&
     isGoalStatus(candidate.status) &&
-    (candidate.tokenBudget === null || typeof candidate.tokenBudget === "number") &&
-    typeof candidate.createdAt === "number" &&
-    typeof candidate.updatedAt === "number" &&
+    (candidate.tokenBudget === null ||
+      (typeof candidate.tokenBudget === "number" &&
+        Number.isInteger(candidate.tokenBudget) &&
+        candidate.tokenBudget > 0)) &&
+    Number.isInteger(candidate.createdAt) &&
+    candidate.createdAt >= 0 &&
+    Number.isInteger(candidate.updatedAt) &&
+    candidate.updatedAt >= 0 &&
     candidate.usage !== undefined &&
-    typeof candidate.usage.tokensUsed === "number" &&
-    typeof candidate.usage.activeSeconds === "number" &&
+    typeof candidate.usage === "object" &&
+    Number.isInteger(candidate.usage.tokensUsed) &&
+    candidate.usage.tokensUsed >= 0 &&
+    Number.isInteger(candidate.usage.activeSeconds) &&
+    candidate.usage.activeSeconds >= 0 &&
     isOptionalGoalPolicy(candidate.policy) &&
     isOptionalGoalProgress(candidate.progress) &&
     isOptionalGoalLimitReason(candidate.limitReason)
@@ -390,10 +401,11 @@ export function recordContinuationQueued(current: ThreadGoal | null): GoalResult
   }
 
   const goal = cloneGoal(current);
+  const progress = goalProgress(goal);
   goal.policy = goalPolicy(goal);
   goal.progress = {
-    ...goalProgress(goal),
-    continuationTurns: goalProgress(goal).continuationTurns + 1,
+    ...progress,
+    continuationTurns: progress.continuationTurns + 1,
   };
   goal.updatedAt = unixSeconds();
 
@@ -453,7 +465,10 @@ export function recordToolErrorObserved(
     signature,
     toolName,
     normalizedError,
-    count: previous?.signature === signature ? previous.count + 1 : 1,
+    count:
+      previous?.signature === signature && previous?.normalizedError === normalizedError
+        ? previous.count + 1
+        : 1,
   };
   goal.policy = goalPolicy(goal);
   goal.progress = progress;

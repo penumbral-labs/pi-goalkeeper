@@ -109,17 +109,23 @@ function queuedGoalWorkMessageId(message: {
 }
 
 function stableJson(value: unknown): string {
+  if (value === undefined) {
+    return "null";
+  }
   if (value === null || typeof value !== "object") {
-    return JSON.stringify(value);
+    return JSON.stringify(value) ?? "null";
   }
   if (Array.isArray(value)) {
     return `[${value.map((item) => stableJson(item)).join(",")}]`;
   }
   const record = value as Record<string, unknown>;
-  return `{${Object.keys(record)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
-    .join(",")}}`;
+  return "{" +
+    Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => JSON.stringify(key) + ":" + stableJson(record[key]))
+      .join(",") +
+    "}";
 }
 
 function toolSignature(toolName: string, input: unknown): string {
@@ -145,6 +151,7 @@ export default function (pi: ExtensionAPI): void {
     lastAccountedAt: null,
     budgetWarningSentFor: null,
   };
+  const toolCallInputs = new Map<string, unknown>();
 
   const goalForDisplay = (): ThreadGoal | null =>
     goalWithLiveUsage(goal, accounting.activeGoalId, accounting.lastAccountedAt);
@@ -546,15 +553,8 @@ export default function (pi: ExtensionAPI): void {
     refreshUi(ctx);
   });
 
-  const onToolCall = pi.on as unknown as (
-    event: "tool_call",
-    handler: (
-      event: { toolName: string; input: unknown },
-      ctx: ExtensionContext,
-    ) => Promise<{ block: true; reason?: string } | undefined>,
-  ) => void;
-
-  onToolCall("tool_call", async (_event, ctx) => {
+  pi.on("tool_call", async (_event, ctx) => {
+    toolCallInputs.set(_event.toolCallId, _event.input);
     const decision = recordToolCallOrLimit(_event.toolName, _event.input, ctx);
     if (decision.block) {
       return decision.reason ? { block: true, reason: decision.reason } : { block: true };
@@ -562,9 +562,10 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("tool_execution_end", async (_event, ctx) => {
+    const args = toolCallInputs.get(_event.toolCallId) ?? {};
+    toolCallInputs.delete(_event.toolCallId);
     if (_event.isError) {
-      const eventWithArgs = _event as typeof _event & { args?: unknown };
-      recordToolErrorOrLimit(_event.toolName, eventWithArgs.args ?? {}, _event.result, ctx);
+      recordToolErrorOrLimit(_event.toolName, args, _event.result, ctx);
     } else {
       clearToolErrorIfNeeded(ctx);
     }

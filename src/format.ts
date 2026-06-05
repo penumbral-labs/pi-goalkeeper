@@ -197,7 +197,7 @@ export function toToolGoal(goal: ThreadGoal): GoalToolRecord {
     tokenBudget: goal.tokenBudget,
     tokensUsed: goal.usage.tokensUsed,
     timeUsedSeconds: goal.usage.activeSeconds,
-    policy: goal.policy ? { ...goal.policy } : null,
+    policy: goal.policy ? JSON.parse(JSON.stringify(goal.policy)) : null,
     progress: goal.progress ? JSON.parse(JSON.stringify(goal.progress)) : null,
     limitReason: goal.limitReason ?? null,
     createdAt: goal.createdAt,

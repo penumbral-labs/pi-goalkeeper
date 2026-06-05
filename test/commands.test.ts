@@ -128,7 +128,7 @@ test("/goal resume does not restart an over-budget budget-limited goal", async (
   assert.equal(harness.sentMessages.length, 0);
 });
 
-test("/goal resume trips max continuation safety fuse before hidden follow-up", async () => {
+test("/goal resume trips max continuation breaker before hidden follow-up", async () => {
   const harness = createHarness();
 
   await handleGoalCommand(harness.pi, harness.host, "ship the feature", harness.ctx);
@@ -143,7 +143,8 @@ test("/goal resume trips max continuation safety fuse before hidden follow-up", 
 
   await handleGoalCommand(harness.pi, harness.host, "resume", harness.ctx);
 
-  assert.equal(harness.goal?.status, "safetyLimited");
+  assert.equal(harness.goal?.status, "loopLimited");
   assert.equal(harness.goal?.limitReason, "maxContinuationTurns");
   assert.equal(harness.sentMessages.length, 0);
+  assert.equal(harness.notifications.at(-1), "Goal limited by maxContinuationTurns.");
 });

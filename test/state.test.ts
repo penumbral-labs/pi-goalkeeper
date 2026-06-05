@@ -15,6 +15,7 @@ import {
   clearEntry,
   createGoal,
   goalWithLiveUsage,
+  recordToolErrorObserved,
   reconstructGoal,
   setEntry,
   updateGoalStatus,
@@ -80,6 +81,96 @@ test("reconstructGoal rejects malformed policy and progress entries", () => {
     goal: null,
     hasGoal: false,
   });
+});
+
+test("recordToolErrorObserved increments repeated-tool-error count for identical signature and normalized error", () => {
+  const created = createGoal(null, "finish", 10).goal;
+  assert.ok(created);
+
+  const first = recordToolErrorObserved(created, "bash", "bash:{\"command\":\"missing\"}", "missing command");
+  assert.equal(first.ok, true);
+  assert.equal(first.goal?.progress?.repeatedToolError?.count, 1);
+
+  const second = recordToolErrorObserved(first.goal, "bash", "bash:{\"command\":\"missing\"}", "missing command");
+  assert.equal(second.ok, true);
+  assert.equal(second.goal?.progress?.repeatedToolError?.count, 2);
+
+  const third = recordToolErrorObserved(second.goal, "bash", "bash:{\"command\":\"missing\"}", "missing command");
+  assert.equal(third.ok, true);
+  assert.equal(third.goal?.progress?.repeatedToolError?.count, 3);
+});
+
+test("recordToolErrorObserved resets repeated-tool-error count when normalized error changes", () => {
+  const created = createGoal(null, "finish", 10).goal;
+  assert.ok(created);
+
+  const first = recordToolErrorObserved(created, "bash", "bash:{\"command\":\"missing\"}", "missing command");
+  assert.equal(first.ok, true);
+  assert.equal(first.goal?.progress?.repeatedToolError?.count, 1);
+
+  const second = recordToolErrorObserved(first.goal, "bash", "bash:{\"command\":\"missing\"}", "permission denied");
+  assert.equal(second.ok, true);
+  assert.equal(second.goal?.progress?.repeatedToolError?.count, 1);
+
+  const third = recordToolErrorObserved(second.goal, "bash", "bash:{\"command\":\"missing\"}", "missing command");
+  assert.equal(third.ok, true);
+  assert.equal(third.goal?.progress?.repeatedToolError?.count, 1);
+});
+
+test("reconstructGoal rejects malformed numeric thread goal fields", () => {
+  const created = createGoal(null, "finish", 10).goal;
+  assert.ok(created);
+
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, tokenBudget: Number.NaN }, "runtime", 1) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, tokenBudget: Number.POSITIVE_INFINITY }, "runtime", 2) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, tokenBudget: 0 }, "runtime", 3) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, createdAt: 1.5 }, "runtime", 4) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, updatedAt: -1 }, "runtime", 5) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, usage: { ...created.usage, tokensUsed: 3.5 } }, "runtime", 6) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      {
+        type: "custom",
+        customType: CUSTOM_ENTRY_TYPE,
+        data: setEntry(
+          { ...created, usage: { ...created.usage, activeSeconds: Number.NEGATIVE_INFINITY } },
+          "runtime",
+          7,
+        ),
+      },
+    ]),
+    { goal: null, hasGoal: false },
+  );
 });
 
 test("updateGoalStatus marks completion without clearing final usage", () => {

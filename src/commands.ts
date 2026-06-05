@@ -34,25 +34,43 @@ function completions(prefix: string) {
   }));
 }
 
+interface QueueGoalTurnResult {
+  queued: boolean;
+  message: string;
+  notifyType?: "warning" | "error";
+}
+
 function queueGoalTurn(
   pi: GoalCommandPi,
   host: CommandHost,
   goal: ThreadGoal,
   kind: "command_start" | "command_resume",
   ctx: GoalCommandContext,
-): void {
+): QueueGoalTurnResult {
   if (hasReachedContinuationLimit(goal)) {
     const result = limitGoal(goal, "maxContinuationTurns");
-    if (result.ok && result.goal) {
-      host.setGoal(result.goal, "runtime", ctx);
-      ctx.ui.notify(result.message, "warning");
+    if (!result.ok || !result.goal) {
+      return {
+        queued: false,
+        message: result.message,
+        notifyType: "error",
+      };
     }
-    return;
+    host.setGoal(result.goal, "runtime", ctx);
+    return {
+      queued: false,
+      message: result.message,
+      notifyType: "warning",
+    };
   }
 
   const result = recordContinuationQueued(goal);
   if (!result.ok || !result.goal) {
-    return;
+    return {
+      queued: false,
+      message: result.message,
+      notifyType: "error",
+    };
   }
 
   host.setGoal(result.goal, "runtime", ctx);
@@ -65,6 +83,11 @@ function queueGoalTurn(
     },
     { triggerTurn: true, deliverAs: "followUp" },
   );
+
+  return {
+    queued: true,
+    message: result.message,
+  };
 }
 
 export async function handleGoalCommand(
@@ -99,10 +122,16 @@ export async function handleGoalCommand(
       return;
     }
     host.setGoal(result.goal, "command", ctx);
-    ctx.ui.notify(result.message);
+
     if (trimmed === "resume" && result.goal.status === "active") {
-      queueGoalTurn(pi, host, result.goal, "command_resume", ctx);
+      const queueResult = queueGoalTurn(pi, host, result.goal, "command_resume", ctx);
+      if (!queueResult.queued) {
+        ctx.ui.notify(queueResult.message, queueResult.notifyType);
+        return;
+      }
     }
+
+    ctx.ui.notify(result.message);
     return;
   }
 
@@ -128,8 +157,13 @@ export async function handleGoalCommand(
     return;
   }
   host.setGoal(result.goal, "command", ctx);
+  const queueResult = queueGoalTurn(pi, host, result.goal, "command_start", ctx);
+  if (!queueResult.queued) {
+    ctx.ui.notify(queueResult.message, queueResult.notifyType);
+    return;
+  }
+
   ctx.ui.notify(result.message);
-  queueGoalTurn(pi, host, result.goal, "command_start", ctx);
 }
 
 export function registerGoalCommand(pi: GoalCommandPi, host: CommandHost): void {

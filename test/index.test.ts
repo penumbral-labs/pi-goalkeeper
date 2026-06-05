@@ -360,7 +360,7 @@ test("tool-use turn ends do not queue continuation before tool execution finishe
   assert.equal(harness.sentMessages.length, 0);
 });
 
-test("max continuation turns trips a safety fuse before sending hidden follow-up", async () => {
+test("max continuation turns trips a loop breaker before sending hidden follow-up", async () => {
   const harness = createRuntimeHarness();
   await harness.runCommand("ship it");
   const current = harness.snapshot().goal;
@@ -375,7 +375,7 @@ test("max continuation turns trips a safety fuse before sending hidden follow-up
   await harness.emit("session_tree", { type: "session_tree", newLeafId: "leaf", oldLeafId: null });
 
   const goal = harness.snapshot().goal;
-  assert.equal(goal?.status, "safetyLimited");
+  assert.equal(goal?.status, "loopLimited");
   assert.equal(goal?.limitReason, "maxContinuationTurns");
   assert.equal(goal?.progress?.continuationTurns, 1);
   assert.equal(harness.sentMessages.length, 0);
@@ -428,7 +428,6 @@ test("repeated identical tool errors trip an error breaker", async () => {
       type: "tool_execution_end",
       toolCallId: `tool-${index}`,
       toolName: "bash",
-      args: { command: "missing-command" },
       result: { stderr: "missing-command: command not found", code: 127 },
       isError: true,
     });
@@ -438,6 +437,28 @@ test("repeated identical tool errors trip an error breaker", async () => {
   assert.equal(goal?.status, "errorLimited");
   assert.equal(goal?.limitReason, "repeatedToolError");
   assert.equal(goal?.progress?.repeatedToolError?.count, 3);
+  assert.equal(harness.sentMessages.length, 0);
+});
+
+test("different tool error text for same signature does not accumulate repeated-tool-error count", async () => {
+  const harness = createRuntimeHarness();
+  await harness.runCommand("ship it");
+  harness.sentMessages.length = 0;
+
+  for (let index = 0; index < 3; index += 1) {
+    await harness.emit("tool_execution_end", {
+      type: "tool_execution_end",
+      toolCallId: `tool-${index}`,
+      toolName: "bash",
+      result: index === 1 ? { message: "error two" } : `error ${index + 1}`,
+      isError: true,
+    });
+  }
+
+  const goal = harness.snapshot().goal;
+  assert.equal(goal?.status, "active");
+  assert.equal(goal?.limitReason, undefined);
+  assert.equal(goal?.progress?.repeatedToolError?.count, 1);
   assert.equal(harness.sentMessages.length, 0);
 });
 
@@ -466,7 +487,6 @@ test("budget crossing sends one hidden budget-limit steering message", async () 
     type: "tool_execution_end",
     toolCallId: "tool-call",
     toolName: "bash",
-    args: {},
     result: {},
     isError: false,
   });
