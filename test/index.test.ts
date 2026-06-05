@@ -418,6 +418,59 @@ test("repeated identical tool calls trip a loop breaker before execution", async
   assert.equal(harness.sentMessages.length, 0);
 });
 
+test("blocked tool calls do not leave stale inputs for later execution-end events", async () => {
+  const harness = createRuntimeHarness();
+  await harness.runCommand("ship it");
+  harness.sentMessages.length = 0;
+
+  await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-1",
+    input: { path: "README.md" },
+  });
+  await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-2",
+    input: { path: "README.md" },
+  });
+  await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-3",
+    input: { path: "README.md" },
+  });
+
+  const limitedGoal = harness.snapshot().goal;
+  assert.equal(limitedGoal?.status, "loopLimited");
+  assert.ok(limitedGoal);
+  const { limitReason: _limitReason, ...activeGoal } = limitedGoal;
+  harness.appendGoal({
+    ...activeGoal,
+    status: "active",
+    progress: { continuationTurns: 0 },
+  });
+  await harness.emit("session_tree", { type: "session_tree", newLeafId: "leaf", oldLeafId: null });
+  harness.sentMessages.length = 0;
+
+  for (const toolCallId of ["tool-3", "tool-4", "tool-5"]) {
+    await harness.emit("tool_execution_end", {
+      type: "tool_execution_end",
+      toolCallId,
+      toolName: "bash",
+      result: { stderr: "missing-command: command not found", code: 127 },
+      isError: true,
+    });
+  }
+
+  const goal = harness.snapshot().goal;
+  assert.equal(goal?.status, "errorLimited");
+  assert.equal(goal?.limitReason, "repeatedToolError");
+  assert.equal(goal?.progress?.repeatedToolError?.count, 3);
+  assert.equal(harness.sentMessages.length, 0);
+});
+
 test("repeated identical tool errors trip an error breaker", async () => {
   const harness = createRuntimeHarness();
   await harness.runCommand("ship it");

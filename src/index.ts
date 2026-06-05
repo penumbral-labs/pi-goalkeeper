@@ -557,6 +557,7 @@ export default function (pi: ExtensionAPI): void {
     toolCallInputs.set(_event.toolCallId, _event.input);
     const decision = recordToolCallOrLimit(_event.toolName, _event.input, ctx);
     if (decision.block) {
+      toolCallInputs.delete(_event.toolCallId);
       return decision.reason ? { block: true, reason: decision.reason } : { block: true };
     }
   });

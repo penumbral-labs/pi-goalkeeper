@@ -83,6 +83,21 @@ test("reconstructGoal rejects malformed policy and progress entries", () => {
   });
 });
 
+test("reconstructGoal ignores set-like malformed entries with null usage", () => {
+  const created = createGoal(null, "finish").goal;
+  assert.ok(created);
+
+  const malformedUsage = {
+    ...setEntry(created, "runtime", 1),
+    goal: { ...created, usage: null },
+  };
+
+  assert.deepEqual(reconstructGoal([{ type: "custom", customType: CUSTOM_ENTRY_TYPE, data: malformedUsage }]), {
+    goal: null,
+    hasGoal: false,
+  });
+});
+
 test("recordToolErrorObserved increments repeated-tool-error count for identical signature and normalized error", () => {
   const created = createGoal(null, "finish", 10).goal;
   assert.ok(created);

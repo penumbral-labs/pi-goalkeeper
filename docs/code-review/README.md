@@ -8,6 +8,7 @@ event.
 - Do not read undocumented fields from payloads via type casts (for example `_event.args` on `tool_execution_end`).
 - If an event needs data from a prior event, pass it through an explicit bridge keyed by `toolCallId` (for example cache
   `tool_call.input` and read it from `tool_execution_end`).
+- Clean up bridge/cache entries on blocked or early-return paths that will not emit the matching completion event.
 - Add a focused test that fails when a prior event is missing, so fallback behavior stays explicit.
 
 ## Persisted state validation
@@ -18,6 +19,7 @@ Treat reconstructed/custom entries as untrusted user data.
   `typeof x === "number"` for persisted fields.
 - Reject invalid timestamps and usage counters (`NaN`, `Infinity`, fractions, negative values) for `createdAt`,
   `updatedAt`, `tokenBudget`, `tokensUsed`, and `activeSeconds`.
+- Reject `null` before dereferencing nested object fields from unknown persisted data (`typeof null === "object"`).
 - Keep checks local and aligned with related validators in the same file.
 - Add/keep tests that exercise malformed reconstruction cases.
 

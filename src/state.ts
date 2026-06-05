@@ -191,7 +191,7 @@ export function isThreadGoal(goal: unknown): goal is ThreadGoal {
     candidate.createdAt >= 0 &&
     Number.isInteger(candidate.updatedAt) &&
     candidate.updatedAt >= 0 &&
-    candidate.usage !== undefined &&
+    candidate.usage !== null &&
     typeof candidate.usage === "object" &&
     Number.isInteger(candidate.usage.tokensUsed) &&
     candidate.usage.tokensUsed >= 0 &&
