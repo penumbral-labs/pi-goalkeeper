@@ -27,6 +27,7 @@ Treat reconstructed/custom entries as untrusted user data.
 
 For all repeat-breakers, only increment counters when all identifying dimensions are equal.
 
+- Error-based breakers use a composite key of operation signature and normalized error text.
 - Do not key only on `signature`; include normalized error text whenever it changes breaker state.
 - Reset error repetition counters when either operation signature or normalized text changes.
 - Ensure `repeatedToolCall` and similar counters remain explicit about the dimensions they observe.
@@ -60,6 +61,7 @@ Queueing follow-up turns is a user-facing operation and must report outcomes.
 
 Clone complex goal state consistently and efficiently.
 
-- Deep-clone policy objects when exposing or serializing goal records if progress uses similar isolation guarantees.
+- Deep-clone policy and progress together when exposing or serializing goal records, so callers cannot mutate shared
+  references through returned snapshots or serialized records.
 - Reuse a single progress clone when multiple derived values are read from it in the same path (for example in
   continuation increments).

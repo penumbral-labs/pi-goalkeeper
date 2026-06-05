@@ -423,6 +423,7 @@ test("blocked tool calls do not leave stale inputs for later execution-end event
   await harness.runCommand("ship it");
   harness.sentMessages.length = 0;
 
+  // Phase 1: block repeated read calls to trip the tool-call loop breaker.
   await harness.emit("tool_call", {
     type: "tool_call",
     toolName: "read",
@@ -445,6 +446,8 @@ test("blocked tool calls do not leave stale inputs for later execution-end event
   const limitedGoal = harness.snapshot().goal;
   assert.equal(limitedGoal?.status, "loopLimited");
   assert.ok(limitedGoal);
+
+  // Phase 2: reset the goal to active with fresh progress.
   const { limitReason: _limitReason, ...activeGoal } = limitedGoal;
   harness.appendGoal({
     ...activeGoal,
@@ -454,6 +457,7 @@ test("blocked tool calls do not leave stale inputs for later execution-end event
   await harness.emit("session_tree", { type: "session_tree", newLeafId: "leaf", oldLeafId: null });
   harness.sentMessages.length = 0;
 
+  // Phase 3: reuse tool-3 for bash errors to verify cross-tool input isolation.
   for (const toolCallId of ["tool-3", "tool-4", "tool-5"]) {
     await harness.emit("tool_execution_end", {
       type: "tool_execution_end",
