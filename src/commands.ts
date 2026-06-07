@@ -2,7 +2,13 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 
 import { formatGoalSummary } from "./format.js";
 import { continuationPrompt } from "./prompts.js";
-import { replaceGoal, updateGoalStatus } from "./state.js";
+import {
+  hasReachedContinuationLimit,
+  limitGoal,
+  recordContinuationQueued,
+  replaceGoal,
+  updateGoalStatus,
+} from "./state.js";
 import { CUSTOM_ENTRY_TYPE, type GoalEntrySource, type ThreadGoal } from "./types.js";
 
 export interface CommandHost {
@@ -28,16 +34,60 @@ function completions(prefix: string) {
   }));
 }
 
-function queueGoalTurn(pi: GoalCommandPi, goal: ThreadGoal, kind: "command_start" | "command_resume"): void {
+interface QueueGoalTurnResult {
+  queued: boolean;
+  message: string;
+  notifyType?: "warning" | "error";
+}
+
+function queueGoalTurn(
+  pi: GoalCommandPi,
+  host: CommandHost,
+  goal: ThreadGoal,
+  kind: "command_start" | "command_resume",
+  ctx: GoalCommandContext,
+): QueueGoalTurnResult {
+  if (hasReachedContinuationLimit(goal)) {
+    const result = limitGoal(goal, "maxContinuationTurns");
+    if (!result.ok || !result.goal) {
+      return {
+        queued: false,
+        message: result.message,
+        notifyType: "error",
+      };
+    }
+    host.setGoal(result.goal, "runtime", ctx);
+    return {
+      queued: false,
+      message: result.message,
+      notifyType: "warning",
+    };
+  }
+
+  const result = recordContinuationQueued(goal);
+  if (!result.ok || !result.goal) {
+    return {
+      queued: false,
+      message: result.message,
+      notifyType: "error",
+    };
+  }
+
+  host.setGoal(result.goal, "runtime", ctx);
   pi.sendMessage(
     {
       customType: CUSTOM_ENTRY_TYPE,
-      content: continuationPrompt(goal),
+      content: continuationPrompt(result.goal),
       display: false,
-      details: { kind, goalId: goal.goalId },
+      details: { kind, goalId: result.goal.goalId },
     },
     { triggerTurn: true, deliverAs: "followUp" },
   );
+
+  return {
+    queued: true,
+    message: result.message,
+  };
 }
 
 export async function handleGoalCommand(
@@ -72,10 +122,16 @@ export async function handleGoalCommand(
       return;
     }
     host.setGoal(result.goal, "command", ctx);
-    ctx.ui.notify(result.message);
+
     if (trimmed === "resume" && result.goal.status === "active") {
-      queueGoalTurn(pi, result.goal, "command_resume");
+      const queueResult = queueGoalTurn(pi, host, result.goal, "command_resume", ctx);
+      if (!queueResult.queued) {
+        ctx.ui.notify(queueResult.message, queueResult.notifyType);
+        return;
+      }
     }
+
+    ctx.ui.notify(result.message);
     return;
   }
 
@@ -101,8 +157,13 @@ export async function handleGoalCommand(
     return;
   }
   host.setGoal(result.goal, "command", ctx);
+  const queueResult = queueGoalTurn(pi, host, result.goal, "command_start", ctx);
+  if (!queueResult.queued) {
+    ctx.ui.notify(queueResult.message, queueResult.notifyType);
+    return;
+  }
+
   ctx.ui.notify(result.message);
-  queueGoalTurn(pi, result.goal, "command_start");
 }
 
 export function registerGoalCommand(pi: GoalCommandPi, host: CommandHost): void {

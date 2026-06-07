@@ -3,7 +3,22 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { registerGoalCommand } from "./commands.js";
 import { formatFooterStatus } from "./format.js";
 import { budgetLimitPrompt, continuationGoalIdFromPrompt, continuationPrompt } from "./prompts.js";
-import { applyUsage, clearEntry, goalWithLiveUsage, reconstructGoal, setEntry, updateGoalStatus } from "./state.js";
+import {
+  applyUsage,
+  clearEntry,
+  clearToolErrorProgress,
+  goalPolicy,
+  goalProgress,
+  goalWithLiveUsage,
+  hasReachedContinuationLimit,
+  limitGoal,
+  recordContinuationQueued,
+  recordToolCallObserved,
+  recordToolErrorObserved,
+  reconstructGoal,
+  setEntry,
+  updateGoalStatus,
+} from "./state.js";
 import { registerGoalTools } from "./tools.js";
 import { CUSTOM_ENTRY_TYPE, type GoalEntrySource, type GoalResult, type ThreadGoal } from "./types.js";
 
@@ -93,6 +108,35 @@ function queuedGoalWorkMessageId(message: {
   return null;
 }
 
+function stableJson(value: unknown): string {
+  if (value === undefined) {
+    return "null";
+  }
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return "{" +
+    Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => JSON.stringify(key) + ":" + stableJson(record[key]))
+      .join(",") +
+    "}";
+}
+
+function toolSignature(toolName: string, input: unknown): string {
+  return `${toolName}:${stableJson(input)}`;
+}
+
+function normalizeToolError(result: unknown): string {
+  const normalized = typeof result === "string" ? result : stableJson(result);
+  return normalized.replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
 const CONTINUATION_RETRY_MS = 50;
 
 export default function (pi: ExtensionAPI): void {
@@ -107,6 +151,7 @@ export default function (pi: ExtensionAPI): void {
     lastAccountedAt: null,
     budgetWarningSentFor: null,
   };
+  const toolCallInputs = new Map<string, unknown>();
 
   const goalForDisplay = (): ThreadGoal | null =>
     goalWithLiveUsage(goal, accounting.activeGoalId, accounting.lastAccountedAt);
@@ -293,17 +338,101 @@ export default function (pi: ExtensionAPI): void {
     return result;
   };
 
-  const sendContinuation = (goalToContinue: ThreadGoal): void => {
-    continuationQueuedFor = goalToContinue.goalId;
+  const sendContinuation = (goalToContinue: ThreadGoal, ctx: ExtensionContext): void => {
+    if (hasReachedContinuationLimit(goalToContinue)) {
+      const result = limitGoal(goalToContinue, "maxContinuationTurns");
+      if (result.ok && result.goal) {
+        persistGoal(result.goal, "runtime");
+        refreshUi(ctx);
+      }
+      return;
+    }
+
+    const result = recordContinuationQueued(goalToContinue);
+    if (!result.ok || !result.goal) {
+      return;
+    }
+
+    persistGoal(result.goal, "runtime");
+    refreshUi(ctx);
+    continuationQueuedFor = result.goal.goalId;
     pi.sendMessage(
       {
         customType: CUSTOM_ENTRY_TYPE,
-        content: continuationPrompt(goalToContinue),
+        content: continuationPrompt(result.goal),
         display: false,
-        details: { kind: "continuation", goalId: goalToContinue.goalId },
+        details: { kind: "continuation", goalId: result.goal.goalId },
       },
       { triggerTurn: true, deliverAs: "followUp" },
     );
+  };
+
+  const recordToolCallOrLimit = (
+    toolName: string,
+    input: unknown,
+    ctx: ExtensionContext,
+  ): { block: boolean; reason?: string } => {
+    if (!goal || goal.status !== "active") {
+      return { block: false };
+    }
+
+    const recorded = recordToolCallObserved(goal, toolName, toolSignature(toolName, input));
+    if (!recorded.ok || !recorded.goal) {
+      return { block: false };
+    }
+    persistGoal(recorded.goal, "runtime");
+    refreshUi(ctx);
+
+    const policy = goalPolicy(recorded.goal);
+    const repeated = goalProgress(recorded.goal).repeatedToolCall;
+    if (policy.maxRepeatedToolCalls !== null && repeated && repeated.count >= policy.maxRepeatedToolCalls) {
+      const limited = limitGoal(recorded.goal, "repeatedToolCall");
+      if (limited.ok && limited.goal) {
+        persistGoal(limited.goal, "runtime");
+        refreshUi(ctx);
+      }
+      return {
+        block: true,
+        reason: `Blocked repeated ${toolName} call after ${repeated.count} identical attempts.`,
+      };
+    }
+
+    return { block: false };
+  };
+
+  const recordToolErrorOrLimit = (toolName: string, args: unknown, result: unknown, ctx: ExtensionContext): void => {
+    if (!goal || goal.status !== "active") {
+      return;
+    }
+
+    const normalizedError = normalizeToolError(result);
+    const recorded = recordToolErrorObserved(goal, toolName, toolSignature(toolName, args), normalizedError);
+    if (!recorded.ok || !recorded.goal) {
+      return;
+    }
+    persistGoal(recorded.goal, "runtime");
+    refreshUi(ctx);
+
+    const policy = goalPolicy(recorded.goal);
+    const repeated = goalProgress(recorded.goal).repeatedToolError;
+    if (policy.maxRepeatedToolErrors !== null && repeated && repeated.count >= policy.maxRepeatedToolErrors) {
+      const limited = limitGoal(recorded.goal, "repeatedToolError");
+      if (limited.ok && limited.goal) {
+        persistGoal(limited.goal, "runtime");
+        refreshUi(ctx);
+      }
+    }
+  };
+
+  const clearToolErrorIfNeeded = (ctx: ExtensionContext): void => {
+    if (!goal || goal.status !== "active" || !goalProgress(goal).repeatedToolError) {
+      return;
+    }
+    const result = clearToolErrorProgress(goal);
+    if (result.ok && result.goal && result.goal !== goal) {
+      persistGoal(result.goal, "runtime");
+      refreshUi(ctx);
+    }
   };
 
   const maybeContinue = (ctx: ExtensionContext): void => {
@@ -330,7 +459,7 @@ export default function (pi: ExtensionAPI): void {
     if (!goal || goal.status !== "active" || goal.goalId !== goalId) {
       return;
     }
-    sendContinuation(goal);
+    sendContinuation(goal, ctx);
   };
 
   registerGoalTools(pi, {
@@ -410,11 +539,7 @@ export default function (pi: ExtensionAPI): void {
         ctx.abort();
         refreshUi(ctx);
         return {
-          systemPrompt: [
-            _event.systemPrompt,
-            "",
-            staleGoalContinuationMessage(continuationGoalId, goal),
-          ].join("\n"),
+          systemPrompt: [_event.systemPrompt, "", staleGoalContinuationMessage(continuationGoalId, goal)].join("\n"),
         };
       }
     } else {
@@ -428,7 +553,23 @@ export default function (pi: ExtensionAPI): void {
     refreshUi(ctx);
   });
 
+  pi.on("tool_call", async (_event, ctx) => {
+    toolCallInputs.set(_event.toolCallId, _event.input);
+    const decision = recordToolCallOrLimit(_event.toolName, _event.input, ctx);
+    if (decision.block) {
+      toolCallInputs.delete(_event.toolCallId);
+      return decision.reason ? { block: true, reason: decision.reason } : { block: true };
+    }
+  });
+
   pi.on("tool_execution_end", async (_event, ctx) => {
+    const args = toolCallInputs.get(_event.toolCallId) ?? {};
+    toolCallInputs.delete(_event.toolCallId);
+    if (_event.isError) {
+      recordToolErrorOrLimit(_event.toolName, args, _event.result, ctx);
+    } else {
+      clearToolErrorIfNeeded(ctx);
+    }
     accountProgress(ctx, true, 0, true);
   });
 

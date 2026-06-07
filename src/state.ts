@@ -5,12 +5,25 @@ import {
   MAX_OBJECTIVE_CHARS,
   type GoalCustomEntry,
   type GoalEntrySource,
+  type GoalLimitReason,
+  type GoalPolicy,
+  type GoalProgress,
   type GoalResult,
   type GoalSnapshot,
   type GoalStatus,
   type SessionEntryLike,
   type ThreadGoal,
 } from "./types.js";
+
+export const DEFAULT_GOAL_POLICY: GoalPolicy = {
+  maxContinuationTurns: null,
+  maxRepeatedToolCalls: 3,
+  maxRepeatedToolErrors: 3,
+};
+
+export const DEFAULT_GOAL_PROGRESS: GoalProgress = {
+  continuationTurns: 0,
+};
 
 export interface ApplyUsageOptions {
   expectedGoalId?: string | null;
@@ -22,10 +35,45 @@ export function unixSeconds(): number {
 }
 
 export function cloneGoal(goal: ThreadGoal): ThreadGoal {
-  return {
+  const clone: ThreadGoal = {
     ...goal,
     usage: { ...goal.usage },
   };
+  if (goal.policy) {
+    clone.policy = { ...goal.policy };
+  }
+  if (goal.progress) {
+    clone.progress = cloneProgress(goal.progress);
+  }
+  return clone;
+}
+
+export function goalPolicy(goal: ThreadGoal): GoalPolicy {
+  return {
+    maxContinuationTurns: goal.policy?.maxContinuationTurns ?? DEFAULT_GOAL_POLICY.maxContinuationTurns,
+    maxRepeatedToolCalls: goal.policy?.maxRepeatedToolCalls ?? DEFAULT_GOAL_POLICY.maxRepeatedToolCalls,
+    maxRepeatedToolErrors: goal.policy?.maxRepeatedToolErrors ?? DEFAULT_GOAL_POLICY.maxRepeatedToolErrors,
+  };
+}
+
+export function goalProgress(goal: ThreadGoal): GoalProgress {
+  return cloneProgress({
+    ...DEFAULT_GOAL_PROGRESS,
+    ...goal.progress,
+  });
+}
+
+function cloneProgress(progress: GoalProgress): GoalProgress {
+  const clone: GoalProgress = {
+    continuationTurns: progress.continuationTurns,
+  };
+  if (progress.repeatedToolCall) {
+    clone.repeatedToolCall = { ...progress.repeatedToolCall };
+  }
+  if (progress.repeatedToolError) {
+    clone.repeatedToolError = { ...progress.repeatedToolError };
+  }
+  return clone;
 }
 
 export function validateObjective(objective: string): string | null {
@@ -56,6 +104,25 @@ export function statusAfterBudgetLimit(status: GoalStatus, tokensUsed: number, t
   return status;
 }
 
+function isTerminalLimitedStatus(status: GoalStatus): boolean {
+  return (
+    status === "budgetLimited" || status === "safetyLimited" || status === "loopLimited" || status === "errorLimited"
+  );
+}
+
+function statusForLimitReason(reason: GoalLimitReason): GoalStatus {
+  if (reason === "maxContinuationTurns") {
+    return "loopLimited";
+  }
+  if (reason === "repeatedToolCall") {
+    return "loopLimited";
+  }
+  if (reason === "repeatedToolError") {
+    return "errorLimited";
+  }
+  return "safetyLimited";
+}
+
 export function createThreadGoal(objective: string, tokenBudget?: number | null, now = unixSeconds()): ThreadGoal {
   return {
     goalId: randomUUID(),
@@ -66,6 +133,8 @@ export function createThreadGoal(objective: string, tokenBudget?: number | null,
       tokensUsed: 0,
       activeSeconds: 0,
     },
+    policy: { ...DEFAULT_GOAL_POLICY },
+    progress: { ...DEFAULT_GOAL_PROGRESS },
     createdAt: now,
     updatedAt: now,
   };
@@ -81,11 +150,7 @@ export function setEntry(goal: ThreadGoal, source: GoalEntrySource, at = unixSec
   };
 }
 
-export function clearEntry(
-  clearedGoalId: string | null,
-  source: GoalEntrySource,
-  at = unixSeconds(),
-): GoalCustomEntry {
+export function clearEntry(clearedGoalId: string | null, source: GoalEntrySource, at = unixSeconds()): GoalCustomEntry {
   return {
     version: 1,
     kind: "clear",
@@ -118,17 +183,108 @@ export function isThreadGoal(goal: unknown): goal is ThreadGoal {
     typeof candidate.goalId === "string" &&
     typeof candidate.objective === "string" &&
     isGoalStatus(candidate.status) &&
-    (candidate.tokenBudget === null || typeof candidate.tokenBudget === "number") &&
-    typeof candidate.createdAt === "number" &&
-    typeof candidate.updatedAt === "number" &&
-    candidate.usage !== undefined &&
-    typeof candidate.usage.tokensUsed === "number" &&
-    typeof candidate.usage.activeSeconds === "number"
+    (candidate.tokenBudget === null ||
+      (typeof candidate.tokenBudget === "number" &&
+        Number.isInteger(candidate.tokenBudget) &&
+        candidate.tokenBudget > 0)) &&
+    Number.isInteger(candidate.createdAt) &&
+    candidate.createdAt >= 0 &&
+    Number.isInteger(candidate.updatedAt) &&
+    candidate.updatedAt >= 0 &&
+    candidate.usage !== null &&
+    typeof candidate.usage === "object" &&
+    Number.isInteger(candidate.usage.tokensUsed) &&
+    candidate.usage.tokensUsed >= 0 &&
+    Number.isInteger(candidate.usage.activeSeconds) &&
+    candidate.usage.activeSeconds >= 0 &&
+    isOptionalGoalPolicy(candidate.policy) &&
+    isOptionalGoalProgress(candidate.progress) &&
+    isOptionalGoalLimitReason(candidate.limitReason)
+  );
+}
+
+function isOptionalGoalPolicy(policy: unknown): policy is GoalPolicy | undefined {
+  if (policy === undefined) {
+    return true;
+  }
+  if (!policy || typeof policy !== "object") {
+    return false;
+  }
+  const candidate = policy as GoalPolicy;
+  return (
+    isOptionalLimit(candidate.maxContinuationTurns) &&
+    isOptionalLimit(candidate.maxRepeatedToolCalls) &&
+    isOptionalLimit(candidate.maxRepeatedToolErrors)
+  );
+}
+
+function isOptionalGoalProgress(progress: unknown): progress is GoalProgress | undefined {
+  if (progress === undefined) {
+    return true;
+  }
+  if (!progress || typeof progress !== "object") {
+    return false;
+  }
+  const candidate = progress as GoalProgress;
+  return (
+    Number.isInteger(candidate.continuationTurns) &&
+    candidate.continuationTurns >= 0 &&
+    isOptionalRepeatedToolCallProgress(candidate.repeatedToolCall) &&
+    isOptionalRepeatedToolErrorProgress(candidate.repeatedToolError)
+  );
+}
+
+function isOptionalLimit(value: unknown): value is number | null | undefined {
+  return value === undefined || value === null || (typeof value === "number" && Number.isInteger(value) && value >= 0);
+}
+
+function isOptionalRepeatedToolCallProgress(progress: unknown): progress is GoalProgress["repeatedToolCall"] {
+  if (progress === undefined) {
+    return true;
+  }
+  if (!progress || typeof progress !== "object") {
+    return false;
+  }
+  const candidate = progress as { signature?: unknown; toolName?: unknown; count?: unknown };
+  return (
+    typeof candidate.signature === "string" &&
+    typeof candidate.toolName === "string" &&
+    typeof candidate.count === "number" &&
+    Number.isInteger(candidate.count) &&
+    candidate.count >= 0
+  );
+}
+
+function isOptionalRepeatedToolErrorProgress(progress: unknown): progress is GoalProgress["repeatedToolError"] {
+  if (progress === undefined) {
+    return true;
+  }
+  if (!progress || typeof progress !== "object") {
+    return false;
+  }
+  const candidate = progress as { normalizedError?: unknown };
+  return isOptionalRepeatedToolCallProgress(progress) && typeof candidate.normalizedError === "string";
+}
+
+function isOptionalGoalLimitReason(reason: unknown): reason is GoalLimitReason | undefined {
+  return (
+    reason === undefined ||
+    reason === "maxContinuationTurns" ||
+    reason === "repeatedToolCall" ||
+    reason === "repeatedToolError"
   );
 }
 
 export function isGoalStatus(status: unknown): status is GoalStatus {
-  return status === "active" || status === "paused" || status === "budgetLimited" || status === "complete";
+  return (
+    status === "active" ||
+    status === "paused" ||
+    status === "budgetLimited" ||
+    status === "safetyLimited" ||
+    status === "loopLimited" ||
+    status === "errorLimited" ||
+    status === "complete"
+  );
 }
 
 export function reconstructGoal(entries: Iterable<SessionEntryLike>): GoalSnapshot {
@@ -213,6 +369,8 @@ export function updateGoalStatus(current: ThreadGoal | null, status: GoalStatus)
   const goal = cloneGoal(current);
   if (current.status === "budgetLimited" && (status === "active" || status === "paused")) {
     goal.status = "budgetLimited";
+  } else if (isTerminalLimitedStatus(current.status) && (status === "active" || status === "paused")) {
+    goal.status = current.status;
   } else {
     goal.status = statusAfterBudgetLimit(status, goal.usage.tokensUsed, goal.tokenBudget);
   }
@@ -221,6 +379,157 @@ export function updateGoalStatus(current: ThreadGoal | null, status: GoalStatus)
   return {
     ok: true,
     message: `Goal marked ${goal.status}.`,
+    goal,
+  };
+}
+
+export function hasReachedContinuationLimit(goal: ThreadGoal): boolean {
+  const policy = goalPolicy(goal);
+  if (policy.maxContinuationTurns === null) {
+    return false;
+  }
+  return goalProgress(goal).continuationTurns >= policy.maxContinuationTurns;
+}
+
+export function recordContinuationQueued(current: ThreadGoal | null): GoalResult {
+  if (!current) {
+    return {
+      ok: false,
+      message: "No active goal exists.",
+      goal: null,
+    };
+  }
+
+  const goal = cloneGoal(current);
+  const progress = goalProgress(goal);
+  goal.policy = goalPolicy(goal);
+  goal.progress = {
+    ...progress,
+    continuationTurns: progress.continuationTurns + 1,
+  };
+  goal.updatedAt = unixSeconds();
+
+  return {
+    ok: true,
+    message: "Goal continuation recorded.",
+    goal,
+  };
+}
+
+export function recordToolCallObserved(current: ThreadGoal | null, toolName: string, signature: string): GoalResult {
+  if (!current) {
+    return {
+      ok: false,
+      message: "No active goal exists.",
+      goal: null,
+    };
+  }
+
+  const goal = cloneGoal(current);
+  const progress = goalProgress(goal);
+  const previous = progress.repeatedToolCall;
+  progress.repeatedToolCall = {
+    signature,
+    toolName,
+    count: previous?.signature === signature ? previous.count + 1 : 1,
+  };
+  goal.policy = goalPolicy(goal);
+  goal.progress = progress;
+  goal.updatedAt = unixSeconds();
+
+  return {
+    ok: true,
+    message: "Goal tool call recorded.",
+    goal,
+  };
+}
+
+export function recordToolErrorObserved(
+  current: ThreadGoal | null,
+  toolName: string,
+  signature: string,
+  normalizedError: string,
+): GoalResult {
+  if (!current) {
+    return {
+      ok: false,
+      message: "No active goal exists.",
+      goal: null,
+    };
+  }
+
+  const goal = cloneGoal(current);
+  const progress = goalProgress(goal);
+  const previous = progress.repeatedToolError;
+  progress.repeatedToolError = {
+    signature,
+    toolName,
+    normalizedError,
+    count:
+      previous?.signature === signature && previous?.normalizedError === normalizedError
+        ? previous.count + 1
+        : 1,
+  };
+  goal.policy = goalPolicy(goal);
+  goal.progress = progress;
+  goal.updatedAt = unixSeconds();
+
+  return {
+    ok: true,
+    message: "Goal tool error recorded.",
+    goal,
+  };
+}
+
+export function clearToolErrorProgress(current: ThreadGoal | null): GoalResult {
+  if (!current) {
+    return {
+      ok: false,
+      message: "No active goal exists.",
+      goal: null,
+    };
+  }
+
+  const progress = goalProgress(current);
+  if (!progress.repeatedToolError) {
+    return {
+      ok: true,
+      message: "Goal tool error progress unchanged.",
+      goal: current,
+    };
+  }
+
+  const goal = cloneGoal(current);
+  const nextProgress = goalProgress(goal);
+  delete nextProgress.repeatedToolError;
+  goal.progress = nextProgress;
+  goal.updatedAt = unixSeconds();
+  return {
+    ok: true,
+    message: "Goal tool error progress cleared.",
+    goal,
+  };
+}
+
+export function limitGoal(current: ThreadGoal | null, reason: GoalLimitReason): GoalResult {
+  if (!current) {
+    return {
+      ok: false,
+      message: "No active goal exists.",
+      goal: null,
+    };
+  }
+
+  const goal = cloneGoal(current);
+  goal.status = statusForLimitReason(reason);
+  goal.limitReason = reason;
+  goal.policy = goalPolicy(goal);
+  goal.progress = goalProgress(goal);
+  goal.updatedAt = unixSeconds();
+
+  return {
+    ok: true,
+    message: `Goal limited by ${reason}.`,
     goal,
   };
 }

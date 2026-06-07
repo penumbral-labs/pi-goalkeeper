@@ -4,8 +4,8 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import goalExtension from "../src/index.js";
-import { isGoalCustomEntry, reconstructGoal } from "../src/state.js";
-import { CUSTOM_ENTRY_TYPE } from "../src/types.js";
+import { DEFAULT_GOAL_POLICY, isGoalCustomEntry, reconstructGoal, setEntry } from "../src/state.js";
+import { CUSTOM_ENTRY_TYPE, type ThreadGoal } from "../src/types.js";
 
 type EventHandler = (event: object, ctx: ExtensionContext) => unknown | Promise<unknown>;
 
@@ -195,6 +195,9 @@ function createRuntimeHarness(options: { idle?: boolean; pendingMessages?: boole
     get abortCount() {
       return runtime.abortCount;
     },
+    appendGoal(goal: ThreadGoal) {
+      pi.appendEntry(CUSTOM_ENTRY_TYPE, setEntry(goal, "runtime"));
+    },
     snapshot: () => reconstructGoal(entries),
   };
 }
@@ -331,6 +334,7 @@ test("completed turns count input plus output and continue active goals", async 
   const goal = harness.snapshot().goal;
   assert.equal(goal?.status, "active");
   assert.equal(goal?.usage.tokensUsed, 42);
+  assert.equal(goal?.progress?.continuationTurns, 2);
   assert.equal(harness.sentMessages.length, 1);
   assert.equal(harness.sentMessages[0]?.message.customType, CUSTOM_ENTRY_TYPE);
   assert.deepEqual(harness.sentMessages[0]?.message.details, {
@@ -353,6 +357,165 @@ test("tool-use turn ends do not queue continuation before tool execution finishe
   });
 
   assert.equal(harness.snapshot().goal?.status, "active");
+  assert.equal(harness.sentMessages.length, 0);
+});
+
+test("max continuation turns trips a loop breaker before sending hidden follow-up", async () => {
+  const harness = createRuntimeHarness();
+  await harness.runCommand("ship it");
+  const current = harness.snapshot().goal;
+  assert.ok(current);
+  harness.appendGoal({
+    ...current,
+    policy: { ...DEFAULT_GOAL_POLICY, maxContinuationTurns: 1 },
+    progress: { continuationTurns: 1 },
+  });
+  harness.sentMessages.length = 0;
+
+  await harness.emit("session_tree", { type: "session_tree", newLeafId: "leaf", oldLeafId: null });
+
+  const goal = harness.snapshot().goal;
+  assert.equal(goal?.status, "loopLimited");
+  assert.equal(goal?.limitReason, "maxContinuationTurns");
+  assert.equal(goal?.progress?.continuationTurns, 1);
+  assert.equal(harness.sentMessages.length, 0);
+});
+
+test("repeated identical tool calls trip a loop breaker before execution", async () => {
+  const harness = createRuntimeHarness();
+  await harness.runCommand("ship it");
+  harness.sentMessages.length = 0;
+
+  const first = await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-1",
+    input: { path: "README.md" },
+  });
+  const second = await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-2",
+    input: { path: "README.md" },
+  });
+  const third = await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-3",
+    input: { path: "README.md" },
+  });
+
+  assert.equal(first[0], undefined);
+  assert.equal(second[0], undefined);
+  assert.deepEqual(third[0], {
+    block: true,
+    reason: "Blocked repeated read call after 3 identical attempts.",
+  });
+  const goal = harness.snapshot().goal;
+  assert.equal(goal?.status, "loopLimited");
+  assert.equal(goal?.limitReason, "repeatedToolCall");
+  assert.equal(goal?.progress?.repeatedToolCall?.count, 3);
+  assert.equal(harness.sentMessages.length, 0);
+});
+
+test("blocked tool calls do not leave stale inputs for later execution-end events", async () => {
+  const harness = createRuntimeHarness();
+  await harness.runCommand("ship it");
+  harness.sentMessages.length = 0;
+
+  // Phase 1: block repeated read calls to trip the tool-call loop breaker.
+  await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-1",
+    input: { path: "README.md" },
+  });
+  await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-2",
+    input: { path: "README.md" },
+  });
+  await harness.emit("tool_call", {
+    type: "tool_call",
+    toolName: "read",
+    toolCallId: "tool-3",
+    input: { path: "README.md" },
+  });
+
+  const limitedGoal = harness.snapshot().goal;
+  assert.equal(limitedGoal?.status, "loopLimited");
+  assert.ok(limitedGoal);
+
+  // Phase 2: reset the goal to active with fresh progress.
+  const { limitReason: _limitReason, ...activeGoal } = limitedGoal;
+  harness.appendGoal({
+    ...activeGoal,
+    status: "active",
+    progress: { continuationTurns: 0 },
+  });
+  await harness.emit("session_tree", { type: "session_tree", newLeafId: "leaf", oldLeafId: null });
+  harness.sentMessages.length = 0;
+
+  // Phase 3: reuse tool-3 for bash errors to verify cross-tool input isolation.
+  for (const toolCallId of ["tool-3", "tool-4", "tool-5"]) {
+    await harness.emit("tool_execution_end", {
+      type: "tool_execution_end",
+      toolCallId,
+      toolName: "bash",
+      result: { stderr: "missing-command: command not found", code: 127 },
+      isError: true,
+    });
+  }
+
+  const goal = harness.snapshot().goal;
+  assert.equal(goal?.status, "errorLimited");
+  assert.equal(goal?.limitReason, "repeatedToolError");
+  assert.equal(goal?.progress?.repeatedToolError?.count, 3);
+  assert.equal(harness.sentMessages.length, 0);
+});
+
+test("repeated identical tool errors trip an error breaker", async () => {
+  const harness = createRuntimeHarness();
+  await harness.runCommand("ship it");
+  harness.sentMessages.length = 0;
+
+  for (let index = 0; index < 3; index += 1) {
+    await harness.emit("tool_execution_end", {
+      type: "tool_execution_end",
+      toolCallId: `tool-${index}`,
+      toolName: "bash",
+      result: { stderr: "missing-command: command not found", code: 127 },
+      isError: true,
+    });
+  }
+
+  const goal = harness.snapshot().goal;
+  assert.equal(goal?.status, "errorLimited");
+  assert.equal(goal?.limitReason, "repeatedToolError");
+  assert.equal(goal?.progress?.repeatedToolError?.count, 3);
+  assert.equal(harness.sentMessages.length, 0);
+});
+
+test("different tool error text for same signature does not accumulate repeated-tool-error count", async () => {
+  const harness = createRuntimeHarness();
+  await harness.runCommand("ship it");
+  harness.sentMessages.length = 0;
+
+  for (let index = 0; index < 3; index += 1) {
+    await harness.emit("tool_execution_end", {
+      type: "tool_execution_end",
+      toolCallId: `tool-${index}`,
+      toolName: "bash",
+      result: index === 1 ? { message: "error two" } : `error ${index + 1}`,
+      isError: true,
+    });
+  }
+
+  const goal = harness.snapshot().goal;
+  assert.equal(goal?.status, "active");
+  assert.equal(goal?.limitReason, undefined);
+  assert.equal(goal?.progress?.repeatedToolError?.count, 1);
   assert.equal(harness.sentMessages.length, 0);
 });
 
@@ -381,7 +544,6 @@ test("budget crossing sends one hidden budget-limit steering message", async () 
     type: "tool_execution_end",
     toolCallId: "tool-call",
     toolName: "bash",
-    args: {},
     result: {},
     isError: false,
   });
@@ -420,6 +582,9 @@ test("goal tools return Codex-shaped response details", async () => {
 
   assert.equal((created.details.goal as { objective?: string }).objective, "ship it");
   assert.equal((created.details.goal as { tokenBudget?: number }).tokenBudget, 20);
+  assert.deepEqual((created.details.goal as { policy?: unknown }).policy, DEFAULT_GOAL_POLICY);
+  assert.deepEqual((created.details.goal as { progress?: unknown }).progress, { continuationTurns: 0 });
+  assert.equal((created.details.goal as { limitReason?: unknown }).limitReason, null);
   assert.equal(created.details.remainingTokens, 20);
   assert.equal(created.details.completionBudgetReport, null);
   assert.deepEqual(JSON.parse(created.content[0]?.text ?? ""), {
@@ -431,7 +596,10 @@ test("goal tools return Codex-shaped response details", async () => {
   const completed = (await harness.runTool("update_goal", { status: "complete" })) as {
     details: Record<string, unknown>;
   };
-  assert.match(String(completed.details.completionBudgetReport), /^Goal achieved\. Report final budget usage to the user:/);
+  assert.match(
+    String(completed.details.completionBudgetReport),
+    /^Goal achieved\. Report final budget usage to the user:/,
+  );
 });
 
 test("agent end waits for idle before continuing active goals", async () => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { handleGoalCommand, type CommandHost, type GoalCommandContext, type GoalCommandPi } from "../src/commands.js";
-import { applyUsage, updateGoalStatus } from "../src/state.js";
+import { DEFAULT_GOAL_POLICY, applyUsage, updateGoalStatus } from "../src/state.js";
 import { CUSTOM_ENTRY_TYPE, type GoalEntrySource, type ThreadGoal } from "../src/types.js";
 
 type SendMessage = GoalCommandPi["sendMessage"];
@@ -66,6 +66,7 @@ test("/goal objective creates the goal and starts a hidden follow-up turn", asyn
   await handleGoalCommand(harness.pi, harness.host, "ship the feature", harness.ctx);
 
   assert.equal(harness.goal?.objective, "ship the feature");
+  assert.equal(harness.goal?.progress?.continuationTurns, 1);
   assert.equal(harness.notifications.at(-1), "Goal set.");
   assert.equal(harness.sentMessages.length, 1);
   const sentMessage = harness.sentMessages[0];
@@ -96,6 +97,7 @@ test("/goal resume restarts a hidden follow-up turn", async () => {
   await handleGoalCommand(harness.pi, harness.host, "resume", harness.ctx);
 
   assert.equal(harness.goal?.status, "active");
+  assert.equal(harness.goal?.progress?.continuationTurns, 2);
   assert.equal(harness.sentMessages.length, 1);
   const sentMessage = harness.sentMessages[0];
   assert.ok(sentMessage);
@@ -124,4 +126,25 @@ test("/goal resume does not restart an over-budget budget-limited goal", async (
 
   assert.equal(harness.goal?.status, "budgetLimited");
   assert.equal(harness.sentMessages.length, 0);
+});
+
+test("/goal resume trips max continuation breaker before hidden follow-up", async () => {
+  const harness = createHarness();
+
+  await handleGoalCommand(harness.pi, harness.host, "ship the feature", harness.ctx);
+  const paused = updateGoalStatus(harness.goal, "paused").goal;
+  assert.ok(paused);
+  harness.sentMessages.length = 0;
+  harness.setGoal({
+    ...paused,
+    policy: { ...DEFAULT_GOAL_POLICY, maxContinuationTurns: 1 },
+    progress: { continuationTurns: 1 },
+  });
+
+  await handleGoalCommand(harness.pi, harness.host, "resume", harness.ctx);
+
+  assert.equal(harness.goal?.status, "loopLimited");
+  assert.equal(harness.goal?.limitReason, "maxContinuationTurns");
+  assert.equal(harness.sentMessages.length, 0);
+  assert.equal(harness.notifications.at(-1), "Goal limited by maxContinuationTurns.");
 });

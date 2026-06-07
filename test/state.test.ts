@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatBudget, formatDuration, formatFooterStatus, formatGoalSummary, formatTokenValue } from "../src/format.js";
+import {
+  formatBudget,
+  formatDuration,
+  formatFooterStatus,
+  formatGoalSummary,
+  formatTokenValue,
+} from "../src/format.js";
 import { budgetLimitPrompt, continuationPrompt } from "../src/prompts.js";
 import {
+  DEFAULT_GOAL_POLICY,
   applyUsage,
   clearEntry,
   createGoal,
   goalWithLiveUsage,
+  recordToolErrorObserved,
   reconstructGoal,
   setEntry,
   updateGoalStatus,
@@ -24,6 +32,8 @@ test("createGoal validates objective and positive token budgets", () => {
   assert.equal(result.goal?.objective, "ship it");
   assert.equal(result.goal?.status, "active");
   assert.equal(result.goal?.tokenBudget, 123);
+  assert.deepEqual(result.goal?.policy, DEFAULT_GOAL_POLICY);
+  assert.deepEqual(result.goal?.progress, { continuationTurns: 0 });
 });
 
 test("reconstructGoal follows branch-local set and clear entries", () => {
@@ -50,6 +60,132 @@ test("applyUsage marks active goals budgetLimited after crossing budget", () => 
   assert.equal(result.goal?.status, "budgetLimited");
   assert.equal(result.goal?.usage.tokensUsed, 12);
   assert.equal(result.goal?.usage.activeSeconds, 7);
+});
+
+test("reconstructGoal rejects malformed policy and progress entries", () => {
+  const created = createGoal(null, "finish").goal;
+  assert.ok(created);
+
+  const malformedPolicy = {
+    ...setEntry({ ...created, policy: { ...DEFAULT_GOAL_POLICY, maxContinuationTurns: -1 } }, "runtime", 1),
+  };
+  const malformedProgress = {
+    ...setEntry({ ...created, progress: { continuationTurns: 1.5 } }, "runtime", 2),
+  };
+
+  assert.deepEqual(reconstructGoal([{ type: "custom", customType: CUSTOM_ENTRY_TYPE, data: malformedPolicy }]), {
+    goal: null,
+    hasGoal: false,
+  });
+  assert.deepEqual(reconstructGoal([{ type: "custom", customType: CUSTOM_ENTRY_TYPE, data: malformedProgress }]), {
+    goal: null,
+    hasGoal: false,
+  });
+});
+
+test("reconstructGoal ignores set-like malformed entries with null usage", () => {
+  const created = createGoal(null, "finish").goal;
+  assert.ok(created);
+
+  const malformedUsage = {
+    ...setEntry(created, "runtime", 1),
+    goal: { ...created, usage: null },
+  };
+
+  assert.deepEqual(reconstructGoal([{ type: "custom", customType: CUSTOM_ENTRY_TYPE, data: malformedUsage }]), {
+    goal: null,
+    hasGoal: false,
+  });
+});
+
+test("recordToolErrorObserved increments repeated-tool-error count for identical signature and normalized error", () => {
+  const created = createGoal(null, "finish", 10).goal;
+  assert.ok(created);
+
+  const first = recordToolErrorObserved(created, "bash", "bash:{\"command\":\"missing\"}", "missing command");
+  assert.equal(first.ok, true);
+  assert.equal(first.goal?.progress?.repeatedToolError?.count, 1);
+
+  const second = recordToolErrorObserved(first.goal, "bash", "bash:{\"command\":\"missing\"}", "missing command");
+  assert.equal(second.ok, true);
+  assert.equal(second.goal?.progress?.repeatedToolError?.count, 2);
+
+  const third = recordToolErrorObserved(second.goal, "bash", "bash:{\"command\":\"missing\"}", "missing command");
+  assert.equal(third.ok, true);
+  assert.equal(third.goal?.progress?.repeatedToolError?.count, 3);
+});
+
+test("recordToolErrorObserved resets repeated-tool-error count when normalized error changes", () => {
+  const created = createGoal(null, "finish", 10).goal;
+  assert.ok(created);
+
+  const first = recordToolErrorObserved(created, "bash", "bash:{\"command\":\"missing\"}", "missing command");
+  assert.equal(first.ok, true);
+  assert.equal(first.goal?.progress?.repeatedToolError?.count, 1);
+
+  const second = recordToolErrorObserved(first.goal, "bash", "bash:{\"command\":\"missing\"}", "permission denied");
+  assert.equal(second.ok, true);
+  assert.equal(second.goal?.progress?.repeatedToolError?.count, 1);
+
+  const third = recordToolErrorObserved(second.goal, "bash", "bash:{\"command\":\"missing\"}", "missing command");
+  assert.equal(third.ok, true);
+  assert.equal(third.goal?.progress?.repeatedToolError?.count, 1);
+});
+
+test("reconstructGoal rejects malformed numeric thread goal fields", () => {
+  const created = createGoal(null, "finish", 10).goal;
+  assert.ok(created);
+
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, tokenBudget: Number.NaN }, "runtime", 1) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, tokenBudget: Number.POSITIVE_INFINITY }, "runtime", 2) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, tokenBudget: 0 }, "runtime", 3) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, createdAt: 1.5 }, "runtime", 4) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, updatedAt: -1 }, "runtime", 5) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      { type: "custom", customType: CUSTOM_ENTRY_TYPE, data: setEntry({ ...created, usage: { ...created.usage, tokensUsed: 3.5 } }, "runtime", 6) },
+    ]),
+    { goal: null, hasGoal: false },
+  );
+  assert.deepEqual(
+    reconstructGoal([
+      {
+        type: "custom",
+        customType: CUSTOM_ENTRY_TYPE,
+        data: setEntry(
+          { ...created, usage: { ...created.usage, activeSeconds: Number.NEGATIVE_INFINITY } },
+          "runtime",
+          7,
+        ),
+      },
+    ]),
+    { goal: null, hasGoal: false },
+  );
 });
 
 test("updateGoalStatus marks completion without clearing final usage", () => {

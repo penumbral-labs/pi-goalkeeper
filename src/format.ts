@@ -1,4 +1,4 @@
-import type { GoalStatus, ThreadGoal } from "./types.js";
+import type { GoalLimitReason, GoalPolicy, GoalProgress, GoalStatus, ThreadGoal } from "./types.js";
 
 const COMPACT_TOKEN_UNITS = [
   { suffix: "T", value: 1_000_000_000_000 },
@@ -14,6 +14,9 @@ export interface GoalToolRecord {
   tokenBudget: number | null;
   tokensUsed: number;
   timeUsedSeconds: number;
+  policy: GoalPolicy | null;
+  progress: GoalProgress | null;
+  limitReason: GoalLimitReason | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -84,7 +87,19 @@ export function formatBudget(goal: ThreadGoal): string {
 }
 
 function statusLabel(status: GoalStatus): string {
-  return status === "budgetLimited" ? "limited by budget" : status;
+  if (status === "budgetLimited") {
+    return "limited by budget";
+  }
+  if (status === "safetyLimited") {
+    return "limited by safety fuse";
+  }
+  if (status === "loopLimited") {
+    return "limited by loop breaker";
+  }
+  if (status === "errorLimited") {
+    return "limited by repeated errors";
+  }
+  return status;
 }
 
 function commandHint(status: GoalStatus): string {
@@ -93,6 +108,9 @@ function commandHint(status: GoalStatus): string {
   }
   if (status === "paused") {
     return "/goal resume, /goal clear";
+  }
+  if (status === "safetyLimited" || status === "loopLimited" || status === "errorLimited") {
+    return "/goal clear";
   }
   return "/goal clear";
 }
@@ -150,6 +168,18 @@ export function formatFooterStatus(goal: ThreadGoal | null): string | undefined 
     return "Goal abandoned";
   }
 
+  if (goal.status === "safetyLimited") {
+    return "Goal stopped (safety fuse)";
+  }
+
+  if (goal.status === "loopLimited") {
+    return "Goal stopped (loop breaker)";
+  }
+
+  if (goal.status === "errorLimited") {
+    return "Goal stopped (repeated errors)";
+  }
+
   if (goal.tokenBudget !== null) {
     return `Goal achieved (${formatCompactTokenValue(goal.usage.tokensUsed)} tokens)`;
   }
@@ -167,6 +197,9 @@ export function toToolGoal(goal: ThreadGoal): GoalToolRecord {
     tokenBudget: goal.tokenBudget,
     tokensUsed: goal.usage.tokensUsed,
     timeUsedSeconds: goal.usage.activeSeconds,
+    policy: goal.policy ? JSON.parse(JSON.stringify(goal.policy)) : null,
+    progress: goal.progress ? JSON.parse(JSON.stringify(goal.progress)) : null,
+    limitReason: goal.limitReason ?? null,
     createdAt: goal.createdAt,
     updatedAt: goal.updatedAt,
   };
